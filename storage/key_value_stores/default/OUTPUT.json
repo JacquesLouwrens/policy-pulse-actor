@@ -1,4 +1,17 @@
 {
-  "status": "Actor initialized successfully",
-  "timestamp": "2026-01-02T07:29:36.295Z"
+  "originalText": "\n        The European Union will restrict the use of artificial intelligence\n        systems in critical infrastructure starting next year.\n    ",
+  "normalizedText": "the european union will restrict the use of artificial intelligence systems in critical infrastructure starting next year.",
+  "entities": [
+    {
+      "type": "COUNTRY",
+      "value": "european union"
+    }
+  ],
+  "intents": [
+    "RESTRICT"
+  ],
+  "domains": [
+    "AI"
+  ],
+  "extractedAt": "2026-01-02T08:13:56.922Z"
 }
