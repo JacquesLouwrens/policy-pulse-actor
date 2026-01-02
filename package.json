@@ -1,0 +1,13 @@
+{
+  "name": "policy-pulse-actor",
+  "version": "1.0.0",
+  "description": "Global semantic policy and regulatory intelligence actor",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js"
+  },
+  "dependencies": {
+    "apify": "^3.0.0"
+  }
+}
