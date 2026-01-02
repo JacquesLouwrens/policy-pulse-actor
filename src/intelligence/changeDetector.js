@@ -22,7 +22,7 @@
 /**
  * Main comparison function
  */
-function detectSemanticChange(oldSemantics = {}, newSemantics = {}) {
+export function detectSemanticChange(oldSemantics = {}, newSemantics = {}) {
     return {
         added: detectAdded(oldSemantics, newSemantics),
         removed: detectRemoved(oldSemantics, newSemantics),
@@ -127,7 +127,7 @@ function semanticKeys() {
     ];
 }
 
-module.exports = {
-    detectSemanticChange
-};
+//export function detectSemanticChange(previous, current) {
+    // existing implementation stays exactly the same
+//}
 
