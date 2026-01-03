@@ -1,9 +1,19 @@
 import { Actor } from 'apify';
 import { extractSemanticMeaning } from './src/intelligence/semanticEngine.js';
 import { detectSemanticChange } from './src/intelligence/changeDetector.js';
-;
 
 Actor.main(async () => {
+
+    // STEP 2.5.2 — Load previous semantic snapshot
+    const previousSemantic =
+        (await Actor.getValue('semantic-last')) || {
+            topics: [],
+            obligations: [],
+            permissions: [],
+            restrictions: []
+        };
+
+    // Load input
     const input = await Actor.getInput();
 
     const sampleText = input?.text || `
@@ -11,25 +21,16 @@ Actor.main(async () => {
         systems in critical infrastructure starting next year.
     `;
 
-    const semanticResult = extractSemanticMeaning(sampleText);
+    // STEP 2.5.3 — Extract current semantic meaning
+    const currentSemantic = extractSemanticMeaning(sampleText);
 
-    await Actor.setValue('OUTPUT', semanticResult);
-    const previousSemantic = {
-    topics: ["data protection", "user consent"],
-    obligations: ["store data securely"],
-    permissions: ["share with partners"],
-    restrictions: ["no resale"]
-};
+    // STEP 2.5.4 — Detect semantic change
+    const semanticDiff = detectSemanticChange(previousSemantic, currentSemantic);
 
-const currentSemantic = {
-    topics: ["data protection", "user consent", "AI processing"],
-    obligations: ["store data securely", "notify breaches"],
-    permissions: ["share with partners"],
-    restrictions: []
-};
+    // STEP 2.5.5 — Persist results
+    await Actor.setValue('semantic-diff', semanticDiff);
+    await Actor.setValue('semantic-current', currentSemantic);
+    await Actor.setValue('semantic-last', currentSemantic);
 
-const semanticDiff = detectSemanticChange(previousSemantic, currentSemantic);
-
-console.log('Semantic Change Result:', JSON.stringify(semanticDiff, null, 2));
-
+    console.log('Semantic diff stored:', JSON.stringify(semanticDiff, null, 2));
 });
