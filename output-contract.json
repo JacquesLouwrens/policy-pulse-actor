@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Semantic Diff Output",
+  "description": "Stable output contract for semantic comparison actor",
+  "type": "object",
+  "required": ["added", "removed", "modified", "severity", "summary"],
+  "properties": {
+    "added": {
+      "type": "array",
+      "description": "New items detected",
+      "items": {
+        "type": "object",
+        "required": ["type", "category", "affectedItems", "description"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "added"
+          },
+          "category": {
+            "type": "string",
+            "enum": ["topics", "restrictions", "rights", "obligations", "definitions", "procedures", "other"]
+          },
+          "affectedItems": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
+          },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "removed": {
+      "type": "array",
+      "description": "Items that were removed",
+      "items": {
+        "type": "object",
+        "required": ["type", "category", "affectedItems", "description"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "removed"
+          },
+          "category": {
+            "type": "string",
+            "enum": ["topics", "restrictions", "rights", "obligations", "definitions", "procedures", "other"]
+          },
+          "affectedItems": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
+          },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "modified": {
+      "type": "array",
+      "description": "Items that were modified",
+      "items": {
+        "type": "object",
+        "required": ["type", "category", "affectedItems", "description"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "modified"
+          },
+          "category": {
+            "type": "string",
+            "enum": ["topics", "restrictions", "rights", "obligations", "definitions", "procedures", "other"]
+          },
+          "affectedItems": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
+          },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "severity": {
+      "type": "string",
+      "description": "Overall change impact",
+      "enum": ["none", "low", "medium", "high", "critical"]
+    },
+    "summary": {
+      "type": "object",
+      "description": "Change statistics",
+      "required": ["totalChanges", "addedCount", "removedCount", "modifiedCount"],
+      "properties": {
+        "totalChanges": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "addedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "removedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "modifiedCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
