@@ -1,13 +1,16 @@
 {
-    "$schema": "http://json-schema.org/draft-07/schema#",
-    "title": "Policy Pulse Actor Input",
-    "type": "object",
-    "properties": {
-        "url": {
-            "type": "string",
-            "title": "Policy URL",
-            "description": "Enter the URL of the policy page you want to fetch"
-        }
-    },
-    "required": ["url"]
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Policy Pulse Actor Input Schema",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "url": {
+      "title": "Policy URL",
+      "type": "string",
+      "description": "The URL of the policy page to fetch text from",
+      "minLength": 1
+    }
+  },
+  "required": ["url"],
+  "additionalProperties": false
 }
