@@ -1,4 +1,4 @@
-import { requestAsBrowser } from 'apify';
+import { httpRequest } from 'apify';
 
 /**
  * Fetch the text content of a policy page.
