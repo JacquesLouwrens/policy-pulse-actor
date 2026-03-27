@@ -9,7 +9,7 @@
       "type": "string",
       "description": "The URL of the policy page to fetch text from",
       "minLength": 1,
-      "editor": "text"
+      "editor": "textfield"
     }
   },
   "required": ["url"],
