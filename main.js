@@ -2,18 +2,14 @@
 
 // ========== ES MODULE IMPORTS ==========
 import { Actor } from 'apify';
-import OUTPUT_CONTRACT from './output-contract.json' assert { type: 'json' };
 
 import { fetchPolicyText } from './src/fetchers/policyFetcher.js';
 import { extractSemanticMeaning } from './src/intelligence/semanticEngine.js';
 import { detectSemanticChange } from './src/intelligence/changeDetector.js';
 import { generateSignals } from './src/signals/signalGenerator.js';
 
-// ========== LOGGER ==========
-const log = Actor.log;
-
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
-function validateAgainstContract(output) {
+function validateAgainstContract(output, OUTPUT_CONTRACT) {
     const required = ['added', 'removed', 'modified', 'severity', 'summary'];
 
     for (const field of required) {
@@ -107,7 +103,7 @@ function calculateConfidence(semanticDiff, signals) {
 }
 
 // ========== OUTPUT GENERATOR ==========
-async function generateOutput(semanticDiff, signals, url) {
+async function generateOutput(semanticDiff, signals, url, OUTPUT_CONTRACT) {
     const output = {
         added: semanticDiff.added || [],
         removed: semanticDiff.removed || [],
@@ -137,12 +133,17 @@ async function generateOutput(semanticDiff, signals, url) {
         url: url,
     };
 
-    validateAgainstContract(output);
+    validateAgainstContract(output, OUTPUT_CONTRACT);
     return output;
 }
 
 // ========== MAIN ACTOR ==========
 Actor.main(async () => {
+    const log = Actor.log; // fix crash by moving log here
+
+    // Dynamic import for JSON to avoid deprecated top-level assert warning
+    const OUTPUT_CONTRACT = await import('./output-contract.json', { assert: { type: 'json' } }).then(m => m.default);
+
     try {
         log.info('Actor started');
 
@@ -154,7 +155,7 @@ Actor.main(async () => {
 
         log.info('Fetching target URL', { url: input.url });
 
-        // STEP 1 — Fetch policy text using fixed fetchPolicyText
+        // STEP 1 — Fetch policy text
         const rawText = await fetchPolicyText(input.url);
 
         // STEP 2 — Load previous semantic snapshot
@@ -178,7 +179,7 @@ Actor.main(async () => {
         log.info('Semantic processing completed');
 
         // STEP 6 — Generate output
-        const output = await generateOutput(semanticDiff, signals, input.url);
+        const output = await generateOutput(semanticDiff, signals, input.url, OUTPUT_CONTRACT);
 
         // ========== STORAGE ==========
         await Actor.setValue('OUTPUT', output);
