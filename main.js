@@ -139,21 +139,19 @@ async function generateOutput(semanticDiff, signals, url, OUTPUT_CONTRACT) {
 
 // ========== MAIN ACTOR ==========
 Actor.main(async () => {
-    const log = Actor.log; // fix crash by moving log here
+    const log = Actor.log;
 
-    // Dynamic import for JSON to avoid deprecated top-level assert warning
-    const OUTPUT_CONTRACT = await import('./output-contract.json', { assert: { type: 'json' } }).then(m => m.default);
+    // Dynamic import for JSON contract
+    const OUTPUT_CONTRACT_IMPORT = await import('./output-contract.json', { assert: { type: 'json' } });
+    const OUTPUT_CONTRACT = OUTPUT_CONTRACT_IMPORT.default ?? OUTPUT_CONTRACT_IMPORT;
 
     try {
-        log.info('Actor started');
+        log?.info('Actor started') || console.log('Actor started');
 
         const input = await Actor.getInput();
+        if (!input?.url) throw new Error('Input must include a "url" field.');
 
-        if (!input?.url) {
-            throw new Error('Input must include a "url" field.');
-        }
-
-        log.info('Fetching target URL', { url: input.url });
+        log?.info('Fetching target URL', { url: input.url }) || console.log('Fetching target URL', input.url);
 
         // STEP 1 — Fetch policy text
         const rawText = await fetchPolicyText(input.url);
@@ -176,7 +174,7 @@ Actor.main(async () => {
         // STEP 5 — Generate signals
         const signals = generateSignals(semanticDiff) || [];
 
-        log.info('Semantic processing completed');
+        log?.info('Semantic processing completed') || console.log('Semantic processing completed');
 
         // STEP 6 — Generate output
         const output = await generateOutput(semanticDiff, signals, input.url, OUTPUT_CONTRACT);
@@ -184,16 +182,6 @@ Actor.main(async () => {
         // ========== STORAGE ==========
         await Actor.setValue('OUTPUT', output);
         await Actor.setValue('semantic-diff', semanticDiff);
-
-        const meta = {
-            actorVersion: '1.0.0',
-            runTimestamp: new Date().toISOString(),
-            severity: output.severity,
-            changeCount: output.summary.totalChanges,
-        };
-
-        await Actor.setValue('meta', meta);
-
         await Actor.setValue('semantic-current', currentSemantic);
         await Actor.setValue('semantic-last', currentSemantic);
         await Actor.setValue('signals', signals);
@@ -201,15 +189,15 @@ Actor.main(async () => {
         // Dataset output
         await Actor.pushData(output);
 
-        log.info('Actor finished successfully');
+        log?.info('Actor finished successfully') || console.log('Actor finished successfully');
         console.log('Output:', JSON.stringify(output, null, 2));
 
     } catch (error) {
-        log.error('Actor failed', {
-            message: error.message,
-            stack: error.stack,
-        });
-
+        if (log?.error) {
+            log.error('Actor failed', { message: error.message, stack: error.stack });
+        } else {
+            console.error('Actor failed', error);
+        }
         throw error;
     }
 });
