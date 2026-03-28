@@ -1,0 +1,9 @@
+{
+  "name": "policy-pulse-actor",
+  "version": "1.0",
+  "buildTag": "latest",
+  "env": {
+    "NODE_ENV": "production"
+  },
+  "main": "main.js"
+}

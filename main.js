@@ -2,6 +2,7 @@
 
 // ========== ES MODULE IMPORTS ==========
 import { Actor } from 'apify';
+import fs from 'node:fs/promises';
 
 import { fetchPolicyText } from './src/fetchers/policyFetcher.js';
 import { extractSemanticMeaning } from './src/intelligence/semanticEngine.js';
@@ -21,9 +22,11 @@ function validateAgainstContract(output, OUTPUT_CONTRACT) {
     if (!Array.isArray(output.added)) {
         throw new Error('Output contract violation: "added" must be an array');
     }
+
     if (!Array.isArray(output.removed)) {
         throw new Error('Output contract violation: "removed" must be an array');
     }
+
     if (!Array.isArray(output.modified)) {
         throw new Error('Output contract violation: "modified" must be an array');
     }
@@ -58,9 +61,11 @@ function generateSummary(semanticDiff, signals, url) {
     if ((semanticDiff.added?.length || 0) > 0) {
         changes.push(`${semanticDiff.added.length} additions`);
     }
+
     if ((semanticDiff.removed?.length || 0) > 0) {
         changes.push(`${semanticDiff.removed.length} removals`);
     }
+
     if ((semanticDiff.modified?.length || 0) > 0) {
         changes.push(`${semanticDiff.modified.length} modifications`);
     }
@@ -130,40 +135,49 @@ async function generateOutput(semanticDiff, signals, url, OUTPUT_CONTRACT) {
         confidence: calculateConfidence(semanticDiff, signals),
 
         timestamp: new Date().toISOString(),
-        url: url,
+        url,
     };
 
     validateAgainstContract(output, OUTPUT_CONTRACT);
     return output;
 }
 
+// ========== SAFE JSON LOADER ==========
+async function loadOutputContract() {
+    const raw = await fs.readFile(
+        new URL('./output-contract.json', import.meta.url),
+        'utf-8'
+    );
+    return JSON.parse(raw);
+}
+
 // ========== MAIN ACTOR ==========
 Actor.main(async () => {
     const log = Actor.log;
 
-    // Dynamic import for JSON contract
-    const OUTPUT_CONTRACT_IMPORT = await import('./output-contract.json', { assert: { type: 'json' } });
-    const OUTPUT_CONTRACT = OUTPUT_CONTRACT_IMPORT.default ?? OUTPUT_CONTRACT_IMPORT;
-
     try {
         log?.info('Actor started') || console.log('Actor started');
 
-        const input = await Actor.getInput();
-        if (!input?.url) throw new Error('Input must include a "url" field.');
+        const OUTPUT_CONTRACT = await loadOutputContract();
 
-        log?.info('Fetching target URL', { url: input.url }) || console.log('Fetching target URL', input.url);
+        const input = await Actor.getInput();
+        if (!input?.url) {
+            throw new Error('Input must include a "url" field.');
+        }
+
+        log?.info('Fetching target URL', { url: input.url }) ||
+            console.log('Fetching target URL', input.url);
 
         // STEP 1 — Fetch policy text
         const rawText = await fetchPolicyText(input.url);
 
         // STEP 2 — Load previous semantic snapshot
-        const previousSemantic =
-            (await Actor.getValue('semantic-last')) || {
-                topics: [],
-                obligations: [],
-                permissions: [],
-                restrictions: [],
-            };
+        const previousSemantic = (await Actor.getValue('semantic-last')) || {
+            topics: [],
+            obligations: [],
+            permissions: [],
+            restrictions: [],
+        };
 
         // STEP 3 — Extract current semantic meaning
         const currentSemantic = extractSemanticMeaning(rawText);
@@ -174,10 +188,16 @@ Actor.main(async () => {
         // STEP 5 — Generate signals
         const signals = generateSignals(semanticDiff) || [];
 
-        log?.info('Semantic processing completed') || console.log('Semantic processing completed');
+        log?.info('Semantic processing completed') ||
+            console.log('Semantic processing completed');
 
         // STEP 6 — Generate output
-        const output = await generateOutput(semanticDiff, signals, input.url, OUTPUT_CONTRACT);
+        const output = await generateOutput(
+            semanticDiff,
+            signals,
+            input.url,
+            OUTPUT_CONTRACT
+        );
 
         // ========== STORAGE ==========
         await Actor.setValue('OUTPUT', output);
@@ -189,15 +209,11 @@ Actor.main(async () => {
         // Dataset output
         await Actor.pushData(output);
 
-        log?.info('Actor finished successfully') || console.log('Actor finished successfully');
+        log?.info('Actor finished successfully') ||
+            console.log('Actor finished successfully');
         console.log('Output:', JSON.stringify(output, null, 2));
-
     } catch (error) {
-        if (log?.error) {
-            log.error('Actor failed', { message: error.message, stack: error.stack });
-        } else {
-            console.error('Actor failed', error);
-        }
+        console.error('Actor failed:', error?.message || error);
         throw error;
     }
 });
