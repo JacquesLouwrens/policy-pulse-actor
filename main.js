@@ -161,15 +161,40 @@ Actor.main(async () => {
         const OUTPUT_CONTRACT = await loadOutputContract();
 
         const input = await Actor.getInput();
-        if (!input?.url) {
-            throw new Error('Input must include a "url" field.');
+
+        let targetUrl = input?.url;
+
+        if (!targetUrl && typeof input === 'string') {
+            try {
+                const parsed = JSON.parse(input);
+                targetUrl = parsed?.url;
+            } catch {
+                targetUrl = input;
+            }
         }
 
-        log?.info('Fetching target URL', { url: input.url }) ||
-            console.log('Fetching target URL', input.url);
+        if (typeof targetUrl === 'string') {
+            const trimmed = targetUrl.trim();
+
+            if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+                try {
+                    const parsed = JSON.parse(trimmed);
+                    targetUrl = parsed?.url ?? trimmed;
+                } catch {
+                    targetUrl = trimmed;
+                }
+            }
+        }
+
+        if (!targetUrl || typeof targetUrl !== 'string') {
+            throw new Error('Input must include a valid "url" field.');
+        }
+
+        log?.info('Fetching target URL', { url: targetUrl }) ||
+            console.log('Fetching target URL', targetUrl);
 
         // STEP 1 — Fetch policy text
-        const rawText = await fetchPolicyText(input.url);
+        const rawText = await fetchPolicyText(targetUrl);
 
         // STEP 2 — Load previous semantic snapshot
         const previousSemantic = (await Actor.getValue('semantic-last')) || {
@@ -195,7 +220,7 @@ Actor.main(async () => {
         const output = await generateOutput(
             semanticDiff,
             signals,
-            input.url,
+            targetUrl,
             OUTPUT_CONTRACT
         );
 
