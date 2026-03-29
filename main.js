@@ -16,6 +16,7 @@ import { formatDashboardView } from './src/presentation/dashboardFormatter.js';
 import { formatAlertPayload } from './src/presentation/alertFormatter.js';
 import { formatClientReport } from './src/presentation/reportFormatter.js';
 import { sendWebhookAlert } from './src/notifications/webhookNotifier.js';
+import { evaluateAlertDedup, recordSentAlert } from './src/notifications/alertDeduplicator.js';
 
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
 function validateAgainstContract(output, OUTPUT_CONTRACT) {
@@ -486,6 +487,17 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                     source: targetUrl,
                 },
             },
+            alertDedup: {
+                shouldSend: false,
+                reason: 'Fetch failed before dedup evaluation',
+                cooldownMinutes: Number(process.env.ALERT_COOLDOWN_MINUTES || 60),
+            },
+            webhookDelivery: {
+                attempted: false,
+                skipped: true,
+                reason: 'Fetch failed before webhook stage',
+                deliveredAt: null,
+            },
         };
 
         await Actor.setValue(outputKey, blockedOutput);
@@ -561,34 +573,78 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     output.snapshotKey = snapshotKey;
     output.fetchStatus = 'success';
 
-    // STEP 6.5 — Send important alerts only
+    // STEP 6.5 — Send important alerts only, with dedup protection
     const webhookUrl = process.env.WEBHOOK_URL || null;
+    const alertCooldownMinutes = Number(process.env.ALERT_COOLDOWN_MINUTES || 60);
 
-    if (
-        webhookUrl &&
+    const meetsAlertThreshold =
         output?.alertPayload &&
         (
             output.alertPayload.priority === 'p0' ||
             output.alertPayload.priority === 'p1' ||
             output.alertPayload.requiresHumanReview
-        )
-    ) {
-        const webhookResult = await sendWebhookAlert(webhookUrl, output.alertPayload);
+        );
 
-        output.webhookDelivery = {
-            attempted: true,
-            ...webhookResult,
-            deliveredAt: new Date().toISOString(),
+    if (webhookUrl && meetsAlertThreshold) {
+        const dedupDecision = await evaluateAlertDedup({
+            url: targetUrl,
+            alertPayload: output.alertPayload,
+            cooldownMinutes: alertCooldownMinutes,
+        });
+
+        output.alertDedup = dedupDecision;
+
+        if (dedupDecision.shouldSend) {
+            const webhookResult = await sendWebhookAlert(webhookUrl, output.alertPayload);
+
+            output.webhookDelivery = {
+                attempted: true,
+                ...webhookResult,
+                deliveredAt: new Date().toISOString(),
+            };
+
+            if (webhookResult?.success) {
+                await recordSentAlert({
+                    url: targetUrl,
+                    alertPayload: output.alertPayload,
+                    fingerprint: dedupDecision.fingerprint,
+                    cooldownMinutes: alertCooldownMinutes,
+                    webhookResult,
+                });
+            }
+
+            log?.info('Webhook alert processed', {
+                url: targetUrl,
+                priority: output.alertPayload.priority,
+                requiresHumanReview: output.alertPayload.requiresHumanReview,
+                webhookSuccess: webhookResult?.success || false,
+                webhookSkipped: webhookResult?.skipped || false,
+                dedupReason: dedupDecision.reason,
+            }) || console.log('Webhook alert processed', targetUrl);
+        } else {
+            output.webhookDelivery = {
+                attempted: false,
+                skipped: true,
+                reason: dedupDecision.reason,
+                deliveredAt: null,
+            };
+
+            log?.info('Webhook alert skipped by dedup layer', {
+                url: targetUrl,
+                priority: output.alertPayload.priority,
+                dedupReason: dedupDecision.reason,
+                lastSentAt: dedupDecision.lastSentAt,
+            }) || console.log('Webhook alert skipped by dedup layer', targetUrl);
+        }
+    } else {
+        output.alertDedup = {
+            shouldSend: false,
+            reason: !webhookUrl
+                ? 'No webhook URL provided'
+                : 'Alert did not meet send threshold',
+            cooldownMinutes: alertCooldownMinutes,
         };
 
-        log?.info('Webhook alert processed', {
-            url: targetUrl,
-            priority: output.alertPayload.priority,
-            requiresHumanReview: output.alertPayload.requiresHumanReview,
-            webhookSuccess: webhookResult?.success || false,
-            webhookSkipped: webhookResult?.skipped || false,
-        }) || console.log('Webhook alert processed', targetUrl);
-    } else {
         output.webhookDelivery = {
             attempted: false,
             skipped: true,
@@ -758,6 +814,11 @@ Actor.main(async () => {
                                 keyFindings: '- Policy analysis did not complete successfully.',
                                 source: targetUrl,
                             },
+                        },
+                        alertDedup: {
+                            shouldSend: false,
+                            reason: 'Processing failed before dedup evaluation',
+                            cooldownMinutes: Number(process.env.ALERT_COOLDOWN_MINUTES || 60),
                         },
                         webhookDelivery: {
                             attempted: false,
