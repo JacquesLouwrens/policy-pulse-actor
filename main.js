@@ -22,6 +22,12 @@ import {
     applyEscalationToAlert,
     recordEscalationEvent,
 } from './src/notifications/alertEscalator.js';
+import {
+    shouldUseImmediateDelivery,
+    shouldQueueForDigest,
+    queueDigestAlert,
+    recordDigestDelivery,
+} from './src/notifications/digestManager.js';
 
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
 function validateAgainstContract(output, OUTPUT_CONTRACT) {
@@ -502,6 +508,16 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                 reason: 'Fetch failed before escalation evaluation',
                 escalationWindowHours: Number(process.env.ALERT_ESCALATION_WINDOW_HOURS || 24),
             },
+            digestRouting: {
+                mode: 'none',
+                reason: 'Fetch failed before digest evaluation',
+            },
+            digestDelivery: {
+                attempted: false,
+                skipped: true,
+                reason: 'Fetch failed before digest stage',
+                deliveredAt: null,
+            },
             webhookDelivery: {
                 attempted: false,
                 skipped: true,
@@ -583,20 +599,15 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     output.snapshotKey = snapshotKey;
     output.fetchStatus = 'success';
 
-    // STEP 6.5 — Escalate, dedup, and send important alerts only
+    // STEP 6.5 — Hybrid delivery: escalate, then immediate or digest
     const webhookUrl = process.env.WEBHOOK_URL || null;
     const alertCooldownMinutes = Number(process.env.ALERT_COOLDOWN_MINUTES || 60);
     const alertEscalationWindowHours = Number(process.env.ALERT_ESCALATION_WINDOW_HOURS || 24);
+    const digestWindowMinutes = Number(process.env.DIGEST_WINDOW_MINUTES || 180);
+    const digestMaxItems = Number(process.env.DIGEST_MAX_ITEMS || 5);
+    const digestChannel = process.env.DIGEST_CHANNEL || 'policy-digests';
 
-    const meetsAlertThreshold =
-        output?.alertPayload &&
-        (
-            output.alertPayload.priority === 'p0' ||
-            output.alertPayload.priority === 'p1' ||
-            output.alertPayload.requiresHumanReview
-        );
-
-    if (webhookUrl && meetsAlertThreshold) {
+    if (webhookUrl && output?.alertPayload) {
         const escalationDecision = await evaluateAlertEscalation({
             url: targetUrl,
             alertPayload: output.alertPayload,
@@ -615,7 +626,8 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         if (output.dashboardView) {
             output.dashboardView.priority = finalAlertPayload.priority;
             output.dashboardView.requiresHumanReview = Boolean(finalAlertPayload.requiresHumanReview);
-            output.dashboardView.reviewWindow = finalAlertPayload.reviewWindow || output.dashboardView.reviewWindow;
+            output.dashboardView.reviewWindow =
+                finalAlertPayload.reviewWindow || output.dashboardView.reviewWindow;
             output.dashboardView.topDrivers = Array.isArray(finalAlertPayload.topDrivers)
                 ? finalAlertPayload.topDrivers.slice(0, 4)
                 : output.dashboardView.topDrivers;
@@ -628,72 +640,209 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                 finalAlertPayload.reviewWindow || output.riskAssessment.reviewWindow;
         }
 
-        const dedupDecision = await evaluateAlertDedup({
-            url: targetUrl,
-            alertPayload: finalAlertPayload,
-            cooldownMinutes: alertCooldownMinutes,
-        });
+        const useImmediateDelivery = shouldUseImmediateDelivery(finalAlertPayload);
+        const useDigestDelivery = !useImmediateDelivery && shouldQueueForDigest(finalAlertPayload);
 
-        output.alertDedup = dedupDecision;
-
-        if (dedupDecision.shouldSend) {
-            const webhookResult = await sendWebhookAlert(webhookUrl, finalAlertPayload);
-
-            output.webhookDelivery = {
-                attempted: true,
-                ...webhookResult,
-                deliveredAt: new Date().toISOString(),
+        if (useImmediateDelivery) {
+            output.digestRouting = {
+                mode: 'immediate',
+                reason: 'Alert met immediate delivery threshold',
             };
 
-            if (webhookResult?.success) {
-                await recordEscalationEvent({
-                    url: targetUrl,
-                    alertPayload: finalAlertPayload,
-                    escalationDecision,
-                    webhookResult,
-                });
-
-                await recordSentAlert({
-                    url: targetUrl,
-                    alertPayload: finalAlertPayload,
-                    fingerprint: dedupDecision.fingerprint,
-                    cooldownMinutes: alertCooldownMinutes,
-                    webhookResult,
-                });
-            }
-
-            log?.info('Webhook alert processed', {
+            const dedupDecision = await evaluateAlertDedup({
                 url: targetUrl,
-                priority: finalAlertPayload.priority,
-                requiresHumanReview: finalAlertPayload.requiresHumanReview,
-                webhookSuccess: webhookResult?.success || false,
-                webhookSkipped: webhookResult?.skipped || false,
-                dedupReason: dedupDecision.reason,
-                escalated: escalationDecision.escalated,
-                escalationLevel: escalationDecision.escalationLevel,
-            }) || console.log('Webhook alert processed', targetUrl);
+                alertPayload: finalAlertPayload,
+                cooldownMinutes: alertCooldownMinutes,
+            });
+
+            output.alertDedup = dedupDecision;
+
+            if (dedupDecision.shouldSend) {
+                const webhookResult = await sendWebhookAlert(webhookUrl, finalAlertPayload);
+
+                output.webhookDelivery = {
+                    attempted: true,
+                    ...webhookResult,
+                    deliveredAt: new Date().toISOString(),
+                };
+
+                output.digestDelivery = {
+                    attempted: false,
+                    skipped: true,
+                    reason: 'Immediate delivery path used',
+                    deliveredAt: null,
+                };
+
+                if (webhookResult?.success) {
+                    await recordEscalationEvent({
+                        url: targetUrl,
+                        alertPayload: finalAlertPayload,
+                        escalationDecision,
+                        webhookResult,
+                    });
+
+                    await recordSentAlert({
+                        url: targetUrl,
+                        alertPayload: finalAlertPayload,
+                        fingerprint: dedupDecision.fingerprint,
+                        cooldownMinutes: alertCooldownMinutes,
+                        webhookResult,
+                    });
+                }
+
+                log?.info('Immediate webhook alert processed', {
+                    url: targetUrl,
+                    priority: finalAlertPayload.priority,
+                    requiresHumanReview: finalAlertPayload.requiresHumanReview,
+                    webhookSuccess: webhookResult?.success || false,
+                    dedupReason: dedupDecision.reason,
+                    escalated: escalationDecision.escalated,
+                }) || console.log('Immediate webhook alert processed', targetUrl);
+            } else {
+                output.webhookDelivery = {
+                    attempted: false,
+                    skipped: true,
+                    reason: dedupDecision.reason,
+                    deliveredAt: null,
+                };
+
+                output.digestDelivery = {
+                    attempted: false,
+                    skipped: true,
+                    reason: 'Immediate alert skipped by dedup layer',
+                    deliveredAt: null,
+                };
+
+                log?.info('Immediate webhook alert skipped by dedup layer', {
+                    url: targetUrl,
+                    priority: finalAlertPayload.priority,
+                    dedupReason: dedupDecision.reason,
+                    lastSentAt: dedupDecision.lastSentAt,
+                }) || console.log('Immediate webhook alert skipped by dedup layer', targetUrl);
+            }
+        } else if (useDigestDelivery) {
+            output.alertDedup = {
+                shouldSend: false,
+                reason: 'Digest path selected; immediate dedup not applied',
+                cooldownMinutes: alertCooldownMinutes,
+            };
+
+            const digestDecision = await queueDigestAlert({
+                url: targetUrl,
+                alertPayload: finalAlertPayload,
+                channel: digestChannel,
+                windowMinutes: digestWindowMinutes,
+                maxItems: digestMaxItems,
+            });
+
+            output.digestRouting = {
+                mode: 'digest',
+                reason: digestDecision.shouldSendDigest
+                    ? `Digest ready via ${digestDecision.trigger}`
+                    : 'Alert queued for digest delivery',
+                channel: digestChannel,
+                queueCount: digestDecision.queueCount,
+                duplicateSkipped: digestDecision.duplicateSkipped,
+                trigger: digestDecision.trigger,
+            };
+
+            if (digestDecision.shouldSendDigest) {
+                const digestWebhookResult = await sendWebhookAlert(
+                    webhookUrl,
+                    digestDecision.digestPayload
+                );
+
+                output.digestDelivery = {
+                    attempted: true,
+                    ...digestWebhookResult,
+                    deliveredAt: new Date().toISOString(),
+                    trigger: digestDecision.trigger,
+                    itemCount: digestDecision.digestPayload?.itemCount || digestDecision.queueCount,
+                };
+
+                output.webhookDelivery = {
+                    attempted: false,
+                    skipped: true,
+                    reason: 'Digest webhook used instead of immediate alert',
+                    deliveredAt: null,
+                };
+
+                if (digestWebhookResult?.success) {
+                    await recordEscalationEvent({
+                        url: targetUrl,
+                        alertPayload: finalAlertPayload,
+                        escalationDecision,
+                        webhookResult: digestWebhookResult,
+                    });
+
+                    await recordDigestDelivery({
+                        channel: digestChannel,
+                        webhookResult: digestWebhookResult,
+                    });
+                }
+
+                log?.info('Digest webhook processed', {
+                    url: targetUrl,
+                    queueCount: digestDecision.queueCount,
+                    trigger: digestDecision.trigger,
+                    digestSuccess: digestWebhookResult?.success || false,
+                }) || console.log('Digest webhook processed', targetUrl);
+            } else {
+                output.digestDelivery = {
+                    attempted: false,
+                    skipped: true,
+                    reason: digestDecision.duplicateSkipped
+                        ? 'Duplicate alert already queued in digest'
+                        : 'Digest thresholds not yet met',
+                    deliveredAt: null,
+                    queueCount: digestDecision.queueCount,
+                };
+
+                output.webhookDelivery = {
+                    attempted: false,
+                    skipped: true,
+                    reason: 'Queued for digest delivery',
+                    deliveredAt: null,
+                };
+
+                log?.info('Alert queued for digest delivery', {
+                    url: targetUrl,
+                    queueCount: digestDecision.queueCount,
+                    duplicateSkipped: digestDecision.duplicateSkipped,
+                }) || console.log('Alert queued for digest delivery', targetUrl);
+            }
         } else {
-            output.webhookDelivery = {
+            output.alertDedup = {
+                shouldSend: false,
+                reason: 'Alert did not qualify for immediate or digest delivery',
+                cooldownMinutes: alertCooldownMinutes,
+            };
+
+            output.digestRouting = {
+                mode: 'none',
+                reason: 'Alert did not qualify for immediate or digest delivery',
+            };
+
+            output.digestDelivery = {
                 attempted: false,
                 skipped: true,
-                reason: dedupDecision.reason,
+                reason: 'Alert did not qualify for digest delivery',
                 deliveredAt: null,
             };
 
-            log?.info('Webhook alert skipped by dedup layer', {
-                url: targetUrl,
-                priority: finalAlertPayload.priority,
-                dedupReason: dedupDecision.reason,
-                lastSentAt: dedupDecision.lastSentAt,
-                escalated: escalationDecision.escalated,
-            }) || console.log('Webhook alert skipped by dedup layer', targetUrl);
+            output.webhookDelivery = {
+                attempted: false,
+                skipped: true,
+                reason: 'Alert did not qualify for immediate delivery',
+                deliveredAt: null,
+            };
         }
     } else {
         output.alertEscalation = {
             escalated: false,
             reason: !webhookUrl
                 ? 'No webhook URL provided'
-                : 'Alert did not meet send threshold',
+                : 'No alert payload available',
             escalationWindowHours: alertEscalationWindowHours,
         };
 
@@ -701,8 +850,24 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
             shouldSend: false,
             reason: !webhookUrl
                 ? 'No webhook URL provided'
-                : 'Alert did not meet send threshold',
+                : 'No alert payload available',
             cooldownMinutes: alertCooldownMinutes,
+        };
+
+        output.digestRouting = {
+            mode: 'none',
+            reason: !webhookUrl
+                ? 'No webhook URL provided'
+                : 'No alert payload available',
+        };
+
+        output.digestDelivery = {
+            attempted: false,
+            skipped: true,
+            reason: !webhookUrl
+                ? 'No webhook URL provided'
+                : 'No alert payload available',
+            deliveredAt: null,
         };
 
         output.webhookDelivery = {
@@ -710,7 +875,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
             skipped: true,
             reason: !webhookUrl
                 ? 'No webhook URL provided'
-                : 'Alert did not meet send threshold',
+                : 'No alert payload available',
             deliveredAt: null,
         };
     }
@@ -734,6 +899,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         outputKey,
         riskScore: riskAssessment.riskScore,
         webhookAttempted: output.webhookDelivery?.attempted || false,
+        digestAttempted: output.digestDelivery?.attempted || false,
         escalated: output.alertEscalation?.escalated || false,
     }) || console.log('Processed URL successfully', targetUrl);
 
@@ -885,6 +1051,16 @@ Actor.main(async () => {
                             escalated: false,
                             reason: 'Processing failed before escalation evaluation',
                             escalationWindowHours: Number(process.env.ALERT_ESCALATION_WINDOW_HOURS || 24),
+                        },
+                        digestRouting: {
+                            mode: 'none',
+                            reason: 'Processing failed before digest evaluation',
+                        },
+                        digestDelivery: {
+                            attempted: false,
+                            skipped: true,
+                            reason: 'Processing failed before digest stage',
+                            deliveredAt: null,
                         },
                         webhookDelivery: {
                             attempted: false,
