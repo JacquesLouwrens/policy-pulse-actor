@@ -12,6 +12,9 @@ import { generateSignals } from './src/signals/signalGenerator.js';
 import { classifyPolicyType } from './src/intelligence/policyClassifier.js';
 import { explainPolicyChanges } from './src/intelligence/changeExplainer.js';
 import { scorePolicyRisk } from './src/intelligence/riskScorer.js';
+import { formatDashboardView } from './src/presentation/dashboardFormatter.js';
+import { formatAlertPayload } from './src/presentation/alertFormatter.js';
+import { formatClientReport } from './src/presentation/reportFormatter.js';
 
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
 function validateAgainstContract(output, OUTPUT_CONTRACT) {
@@ -172,6 +175,34 @@ async function generateOutput(
     if (riskAssessment) {
         output.riskAssessment = riskAssessment;
     }
+
+    output.dashboardView = formatDashboardView({
+        url,
+        summaryText: output.summaryText,
+        semanticDiff,
+        policyClassification,
+        riskAssessment,
+        changeExplanations,
+        isFirstSeen,
+    });
+
+    output.alertPayload = formatAlertPayload({
+        url,
+        policyClassification,
+        riskAssessment,
+        semanticDiff,
+        summaryText: output.summaryText,
+        isFirstSeen,
+    });
+
+    output.clientReport = formatClientReport({
+        url,
+        policyClassification,
+        semanticDiff,
+        riskAssessment,
+        changeExplanations,
+        isFirstSeen,
+    });
 
     validateAgainstContract(output, OUTPUT_CONTRACT);
     return output;
@@ -404,6 +435,56 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                 drivers: ['Fetch failed'],
                 baselineMode: false,
             },
+            dashboardView: {
+                status: 'fetch_failed',
+                url: targetUrl,
+                primaryType: 'Unknown',
+                verticals: [],
+                severity: 'none',
+                riskScore: 0,
+                businessImpact: 'low',
+                priority: 'p4',
+                requiresHumanReview: false,
+                reviewWindow: 'monitor',
+                totalChanges: 0,
+                addedCount: 0,
+                removedCount: 0,
+                modifiedCount: 0,
+                topDrivers: ['Fetch failed'],
+                topChangeCategories: [],
+                summaryText: `Unable to fetch policy content from ${targetUrl}: ${fetchError.message}`,
+                updatedAt: new Date().toISOString(),
+            },
+            alertPayload: {
+                channel: 'policy-alerts',
+                headline: 'Policy fetch failed',
+                severity: 'none',
+                priority: 'p4',
+                riskScore: 0,
+                businessImpact: 'low',
+                requiresHumanReview: false,
+                reviewWindow: 'monitor',
+                url: targetUrl,
+                primaryType: 'Unknown',
+                topDrivers: ['Fetch failed'],
+                message: `Unable to fetch policy content from ${targetUrl}: ${fetchError.message}`,
+                recommendedAction: 'Retry fetch and verify source accessibility.',
+                createdAt: new Date().toISOString(),
+            },
+            clientReport: {
+                title: 'Policy Pulse Report — Fetch Failed',
+                generatedAt: new Date().toISOString(),
+                audience: 'client',
+                sections: {
+                    overview: 'The source policy page could not be fetched during this run.',
+                    changeSummary: 'No change analysis could be completed.',
+                    riskSummary: 'Risk could not be assessed because source retrieval failed.',
+                    recommendedAction: 'Retry the run and verify the target URL is reachable.',
+                    keyDrivers: '- Fetch failed',
+                    keyFindings: '- No policy content was available for analysis.',
+                    source: targetUrl,
+                },
+            },
         };
 
         await Actor.setValue(outputKey, blockedOutput);
@@ -587,6 +668,56 @@ Actor.main(async () => {
                             recommendedAction: 'Unable to assess risk because processing failed.',
                             drivers: ['Unhandled processing error'],
                             baselineMode: false,
+                        },
+                        dashboardView: {
+                            status: 'processing_failed',
+                            url: targetUrl,
+                            primaryType: 'Unknown',
+                            verticals: [],
+                            severity: 'none',
+                            riskScore: 0,
+                            businessImpact: 'low',
+                            priority: 'p4',
+                            requiresHumanReview: false,
+                            reviewWindow: 'monitor',
+                            totalChanges: 0,
+                            addedCount: 0,
+                            removedCount: 0,
+                            modifiedCount: 0,
+                            topDrivers: ['Unhandled processing error'],
+                            topChangeCategories: [],
+                            summaryText: `Unhandled processing error for ${targetUrl}: ${err.message}`,
+                            updatedAt: new Date().toISOString(),
+                        },
+                        alertPayload: {
+                            channel: 'policy-alerts',
+                            headline: 'Policy processing failed',
+                            severity: 'none',
+                            priority: 'p4',
+                            riskScore: 0,
+                            businessImpact: 'low',
+                            requiresHumanReview: false,
+                            reviewWindow: 'monitor',
+                            url: targetUrl,
+                            primaryType: 'Unknown',
+                            topDrivers: ['Unhandled processing error'],
+                            message: `Unhandled processing error for ${targetUrl}: ${err.message}`,
+                            recommendedAction: 'Inspect logs and retry processing.',
+                            createdAt: new Date().toISOString(),
+                        },
+                        clientReport: {
+                            title: 'Policy Pulse Report — Processing Failed',
+                            generatedAt: new Date().toISOString(),
+                            audience: 'client',
+                            sections: {
+                                overview: 'The policy could not be fully processed during this run.',
+                                changeSummary: 'No change analysis could be completed.',
+                                riskSummary: 'Risk could not be assessed because processing failed.',
+                                recommendedAction: 'Inspect logs, correct the processing issue, and retry.',
+                                keyDrivers: '- Unhandled processing error',
+                                keyFindings: '- Policy analysis did not complete successfully.',
+                                source: targetUrl,
+                            },
                         },
                     };
 
