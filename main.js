@@ -17,6 +17,11 @@ import { formatAlertPayload } from './src/presentation/alertFormatter.js';
 import { formatClientReport } from './src/presentation/reportFormatter.js';
 import { sendWebhookAlert } from './src/notifications/webhookNotifier.js';
 import { evaluateAlertDedup, recordSentAlert } from './src/notifications/alertDeduplicator.js';
+import {
+    evaluateAlertEscalation,
+    applyEscalationToAlert,
+    recordEscalationEvent,
+} from './src/notifications/alertEscalator.js';
 
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
 function validateAgainstContract(output, OUTPUT_CONTRACT) {
@@ -492,6 +497,11 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                 reason: 'Fetch failed before dedup evaluation',
                 cooldownMinutes: Number(process.env.ALERT_COOLDOWN_MINUTES || 60),
             },
+            alertEscalation: {
+                escalated: false,
+                reason: 'Fetch failed before escalation evaluation',
+                escalationWindowHours: Number(process.env.ALERT_ESCALATION_WINDOW_HOURS || 24),
+            },
             webhookDelivery: {
                 attempted: false,
                 skipped: true,
@@ -573,9 +583,10 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     output.snapshotKey = snapshotKey;
     output.fetchStatus = 'success';
 
-    // STEP 6.5 — Send important alerts only, with dedup protection
+    // STEP 6.5 — Escalate, dedup, and send important alerts only
     const webhookUrl = process.env.WEBHOOK_URL || null;
     const alertCooldownMinutes = Number(process.env.ALERT_COOLDOWN_MINUTES || 60);
+    const alertEscalationWindowHours = Number(process.env.ALERT_ESCALATION_WINDOW_HOURS || 24);
 
     const meetsAlertThreshold =
         output?.alertPayload &&
@@ -586,16 +597,47 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         );
 
     if (webhookUrl && meetsAlertThreshold) {
-        const dedupDecision = await evaluateAlertDedup({
+        const escalationDecision = await evaluateAlertEscalation({
             url: targetUrl,
             alertPayload: output.alertPayload,
+            escalationWindowHours: alertEscalationWindowHours,
+        });
+
+        output.alertEscalation = escalationDecision;
+
+        const finalAlertPayload = applyEscalationToAlert(
+            output.alertPayload,
+            escalationDecision
+        );
+
+        output.alertPayload = finalAlertPayload;
+
+        if (output.dashboardView) {
+            output.dashboardView.priority = finalAlertPayload.priority;
+            output.dashboardView.requiresHumanReview = Boolean(finalAlertPayload.requiresHumanReview);
+            output.dashboardView.reviewWindow = finalAlertPayload.reviewWindow || output.dashboardView.reviewWindow;
+            output.dashboardView.topDrivers = Array.isArray(finalAlertPayload.topDrivers)
+                ? finalAlertPayload.topDrivers.slice(0, 4)
+                : output.dashboardView.topDrivers;
+        }
+
+        if (output.riskAssessment) {
+            output.riskAssessment.priority = finalAlertPayload.priority;
+            output.riskAssessment.requiresHumanReview = Boolean(finalAlertPayload.requiresHumanReview);
+            output.riskAssessment.reviewWindow =
+                finalAlertPayload.reviewWindow || output.riskAssessment.reviewWindow;
+        }
+
+        const dedupDecision = await evaluateAlertDedup({
+            url: targetUrl,
+            alertPayload: finalAlertPayload,
             cooldownMinutes: alertCooldownMinutes,
         });
 
         output.alertDedup = dedupDecision;
 
         if (dedupDecision.shouldSend) {
-            const webhookResult = await sendWebhookAlert(webhookUrl, output.alertPayload);
+            const webhookResult = await sendWebhookAlert(webhookUrl, finalAlertPayload);
 
             output.webhookDelivery = {
                 attempted: true,
@@ -604,9 +646,16 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
             };
 
             if (webhookResult?.success) {
+                await recordEscalationEvent({
+                    url: targetUrl,
+                    alertPayload: finalAlertPayload,
+                    escalationDecision,
+                    webhookResult,
+                });
+
                 await recordSentAlert({
                     url: targetUrl,
-                    alertPayload: output.alertPayload,
+                    alertPayload: finalAlertPayload,
                     fingerprint: dedupDecision.fingerprint,
                     cooldownMinutes: alertCooldownMinutes,
                     webhookResult,
@@ -615,11 +664,13 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
 
             log?.info('Webhook alert processed', {
                 url: targetUrl,
-                priority: output.alertPayload.priority,
-                requiresHumanReview: output.alertPayload.requiresHumanReview,
+                priority: finalAlertPayload.priority,
+                requiresHumanReview: finalAlertPayload.requiresHumanReview,
                 webhookSuccess: webhookResult?.success || false,
                 webhookSkipped: webhookResult?.skipped || false,
                 dedupReason: dedupDecision.reason,
+                escalated: escalationDecision.escalated,
+                escalationLevel: escalationDecision.escalationLevel,
             }) || console.log('Webhook alert processed', targetUrl);
         } else {
             output.webhookDelivery = {
@@ -631,12 +682,21 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
 
             log?.info('Webhook alert skipped by dedup layer', {
                 url: targetUrl,
-                priority: output.alertPayload.priority,
+                priority: finalAlertPayload.priority,
                 dedupReason: dedupDecision.reason,
                 lastSentAt: dedupDecision.lastSentAt,
+                escalated: escalationDecision.escalated,
             }) || console.log('Webhook alert skipped by dedup layer', targetUrl);
         }
     } else {
+        output.alertEscalation = {
+            escalated: false,
+            reason: !webhookUrl
+                ? 'No webhook URL provided'
+                : 'Alert did not meet send threshold',
+            escalationWindowHours: alertEscalationWindowHours,
+        };
+
         output.alertDedup = {
             shouldSend: false,
             reason: !webhookUrl
@@ -674,6 +734,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         outputKey,
         riskScore: riskAssessment.riskScore,
         webhookAttempted: output.webhookDelivery?.attempted || false,
+        escalated: output.alertEscalation?.escalated || false,
     }) || console.log('Processed URL successfully', targetUrl);
 
     return output;
@@ -819,6 +880,11 @@ Actor.main(async () => {
                             shouldSend: false,
                             reason: 'Processing failed before dedup evaluation',
                             cooldownMinutes: Number(process.env.ALERT_COOLDOWN_MINUTES || 60),
+                        },
+                        alertEscalation: {
+                            escalated: false,
+                            reason: 'Processing failed before escalation evaluation',
+                            escalationWindowHours: Number(process.env.ALERT_ESCALATION_WINDOW_HOURS || 24),
                         },
                         webhookDelivery: {
                             attempted: false,
