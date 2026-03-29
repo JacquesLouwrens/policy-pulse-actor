@@ -19,6 +19,11 @@ function normalizeBusinessImpact(impact) {
     return valid.includes(impact) ? impact : 'low';
 }
 
+function normalizeReviewWindow(reviewWindow) {
+    const valid = ['immediate', '24h', '7d', '30d', 'monitor', 'baseline_only'];
+    return valid.includes(reviewWindow) ? reviewWindow : 'monitor';
+}
+
 function priorityRank(priority) {
     switch (normalizePriority(priority)) {
         case 'p0':
@@ -31,6 +36,36 @@ function priorityRank(priority) {
             return 3;
         default:
             return 4;
+    }
+}
+
+function businessImpactRank(impact) {
+    switch (normalizeBusinessImpact(impact)) {
+        case 'critical':
+            return 0;
+        case 'high':
+            return 1;
+        case 'medium':
+            return 2;
+        default:
+            return 3;
+    }
+}
+
+function reviewWindowRank(reviewWindow) {
+    switch (normalizeReviewWindow(reviewWindow)) {
+        case 'immediate':
+            return 0;
+        case '24h':
+            return 1;
+        case '7d':
+            return 2;
+        case '30d':
+            return 3;
+        case 'baseline_only':
+            return 4;
+        default:
+            return 5;
     }
 }
 
@@ -68,6 +103,14 @@ function highestPriority(items = []) {
         .sort((a, b) => priorityRank(a) - priorityRank(b))[0];
 }
 
+function highestBusinessImpact(items = []) {
+    if (!items.length) return 'low';
+
+    return items
+        .map((item) => normalizeBusinessImpact(item.businessImpact))
+        .sort((a, b) => businessImpactRank(a) - businessImpactRank(b))[0];
+}
+
 function summarizeCounts(items = []) {
     const summary = {
         p0: 0,
@@ -99,6 +142,25 @@ function summarizeBusinessImpact(items = []) {
     return summary;
 }
 
+function sortEntriesWithinGroup(entries = []) {
+    return [...entries].sort((a, b) => {
+        const impactCompare =
+            businessImpactRank(a.businessImpact) - businessImpactRank(b.businessImpact);
+        if (impactCompare !== 0) return impactCompare;
+
+        const priorityCompare = priorityRank(a.priority) - priorityRank(b.priority);
+        if (priorityCompare !== 0) return priorityCompare;
+
+        const reviewCompare =
+            reviewWindowRank(a.reviewWindow) - reviewWindowRank(b.reviewWindow);
+        if (reviewCompare !== 0) return reviewCompare;
+
+        const aTime = new Date(a.queuedAt || 0).getTime();
+        const bTime = new Date(b.queuedAt || 0).getTime();
+        return aTime - bTime;
+    });
+}
+
 function groupEntriesByPolicyType(items = []) {
     const groupsMap = new Map();
 
@@ -113,19 +175,13 @@ function groupEntriesByPolicyType(items = []) {
     }
 
     const groups = Array.from(groupsMap.entries()).map(([primaryType, entries]) => {
-        const sortedEntries = [...entries].sort((a, b) => {
-            const priorityCompare = priorityRank(a.priority) - priorityRank(b.priority);
-            if (priorityCompare !== 0) return priorityCompare;
-
-            const aTime = new Date(a.queuedAt || 0).getTime();
-            const bTime = new Date(b.queuedAt || 0).getTime();
-            return aTime - bTime;
-        });
+        const sortedEntries = sortEntriesWithinGroup(entries);
 
         return {
             primaryType,
             itemCount: sortedEntries.length,
             highestPriority: highestPriority(sortedEntries),
+            highestBusinessImpact: highestBusinessImpact(sortedEntries),
             summary: summarizeCounts(sortedEntries),
             businessImpactSummary: summarizeBusinessImpact(sortedEntries),
             entries: sortedEntries,
@@ -133,6 +189,10 @@ function groupEntriesByPolicyType(items = []) {
     });
 
     return groups.sort((a, b) => {
+        const impactCompare =
+            businessImpactRank(a.highestBusinessImpact) - businessImpactRank(b.highestBusinessImpact);
+        if (impactCompare !== 0) return impactCompare;
+
         const priorityCompare = priorityRank(a.highestPriority) - priorityRank(b.highestPriority);
         if (priorityCompare !== 0) return priorityCompare;
 
@@ -159,6 +219,7 @@ function buildDigestPayload({
         trigger,
         itemCount: items.length,
         highestPriority: highest,
+        businessImpactSummary,
         summary: {
             p0: counts.p0,
             p1: counts.p1,
@@ -168,7 +229,6 @@ function buildDigestPayload({
             windowMinutes,
             maxItems,
         },
-        businessImpactSummary,
         groupedEntries: groups,
         entries: items.map((item) => ({
             url: item.url,
@@ -237,7 +297,7 @@ export async function queueDigestAlert({
             severity: normalizeString(alertPayload.severity || 'none'),
             businessImpact: normalizeBusinessImpact(alertPayload.businessImpact || 'low'),
             primaryType: normalizeString(alertPayload.primaryType || 'Unknown'),
-            reviewWindow: normalizeString(alertPayload.reviewWindow || 'monitor'),
+            reviewWindow: normalizeReviewWindow(alertPayload.reviewWindow || 'monitor'),
             requiresHumanReview: Boolean(alertPayload.requiresHumanReview),
             recommendedAction: normalizeString(alertPayload.recommendedAction),
             topDrivers: Array.isArray(alertPayload.topDrivers)
