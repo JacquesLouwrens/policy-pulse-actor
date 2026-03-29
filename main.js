@@ -11,6 +11,7 @@ import { detectSemanticChange } from './src/intelligence/changeDetector.js';
 import { generateSignals } from './src/signals/signalGenerator.js';
 import { classifyPolicyType } from './src/intelligence/policyClassifier.js';
 import { explainPolicyChanges } from './src/intelligence/changeExplainer.js';
+import { scorePolicyRisk } from './src/intelligence/riskScorer.js';
 
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
 function validateAgainstContract(output, OUTPUT_CONTRACT) {
@@ -117,7 +118,8 @@ async function generateOutput(
     url,
     OUTPUT_CONTRACT,
     policyClassification = null,
-    changeExplanations = []
+    changeExplanations = [],
+    riskAssessment = null
 ) {
     const output = {
         added: semanticDiff.added || [],
@@ -151,6 +153,10 @@ async function generateOutput(
 
     if (policyClassification) {
         output.policyClassification = policyClassification;
+    }
+
+    if (riskAssessment) {
+        output.riskAssessment = riskAssessment;
     }
 
     validateAgainstContract(output, OUTPUT_CONTRACT);
@@ -375,6 +381,13 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                 confidence: 0,
                 matches: [],
             },
+            riskAssessment: {
+                riskScore: 0,
+                severity: 'none',
+                businessImpact: 'low',
+                recommendedAction: 'Unable to assess risk because the policy page could not be fetched.',
+                drivers: ['Fetch failed'],
+            },
         };
 
         await Actor.setValue(outputKey, blockedOutput);
@@ -408,6 +421,13 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     // STEP 4 — Detect semantic change
     const semanticDiff = detectSemanticChange(previousSemantic, currentSemantic);
 
+    // STEP 4.5 — Score policy risk
+    const riskAssessment = scorePolicyRisk({
+        semanticDiff,
+        policyClassification,
+        changeExplanations,
+    });
+
     // STEP 5 — Generate signals
     const signals = generateSignals(semanticDiff) || [];
 
@@ -419,6 +439,8 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         primaryPolicyType: policyClassification.primaryType,
         classificationConfidence: policyClassification.confidence,
         changeExplanationCount: changeExplanations.length,
+        riskScore: riskAssessment.riskScore,
+        businessImpact: riskAssessment.businessImpact,
     }) || console.log('Semantic processing completed');
 
     // STEP 6 — Generate output
@@ -428,7 +450,8 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         targetUrl,
         OUTPUT_CONTRACT,
         policyClassification,
-        changeExplanations
+        changeExplanations,
+        riskAssessment
     );
 
     output.snapshotKey = snapshotKey;
@@ -450,6 +473,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         url: targetUrl,
         snapshotKey,
         outputKey,
+        riskScore: riskAssessment.riskScore,
     }) || console.log('Processed URL successfully', targetUrl);
 
     return output;
@@ -531,6 +555,13 @@ Actor.main(async () => {
                             verticals: [],
                             confidence: 0,
                             matches: [],
+                        },
+                        riskAssessment: {
+                            riskScore: 0,
+                            severity: 'none',
+                            businessImpact: 'low',
+                            recommendedAction: 'Unable to assess risk because processing failed.',
+                            drivers: ['Unhandled processing error'],
                         },
                     };
 
