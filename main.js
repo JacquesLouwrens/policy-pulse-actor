@@ -210,7 +210,6 @@ function normalizeInputToUrls(input) {
             try {
                 const reparsed = JSON.parse(trimmedUrl);
 
-                // Merge reparsed content back in if it looks like structured input
                 if (typeof reparsed === 'object' && reparsed !== null) {
                     parsedInput = reparsed;
                 }
@@ -231,7 +230,6 @@ function normalizeInputToUrls(input) {
             if (typeof value === 'string') {
                 const trimmed = value.trim();
 
-                // handle accidentally nested JSON strings inside urls array
                 if (
                     (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
                     (trimmed.startsWith('[') && trimmed.endsWith(']'))
@@ -273,6 +271,35 @@ function normalizeInputToUrls(input) {
     }
 
     return cleanedUrls;
+}
+
+// ========== CONCURRENCY NORMALIZATION ==========
+function normalizeConcurrency(input) {
+    let rawConcurrency = input?.concurrency;
+
+    if (typeof input === 'string') {
+        const trimmed = input.trim();
+
+        if (
+            (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+            (trimmed.startsWith('[') && trimmed.endsWith(']'))
+        ) {
+            try {
+                const parsed = JSON.parse(trimmed);
+                rawConcurrency = parsed?.concurrency;
+            } catch {
+                // ignore
+            }
+        }
+    }
+
+    const parsedNumber = Number(rawConcurrency);
+
+    if (!Number.isFinite(parsedNumber)) {
+        return 2;
+    }
+
+    return Math.max(1, Math.min(Math.floor(parsedNumber), 5));
 }
 
 // ========== SINGLE URL PROCESSOR ==========
@@ -383,6 +410,33 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     return output;
 }
 
+// ========== CONCURRENCY RUNNER ==========
+async function runWithConcurrencyLimit(items, concurrency, workerFn) {
+    const results = new Array(items.length);
+    let nextIndex = 0;
+
+    async function worker() {
+        while (true) {
+            const currentIndex = nextIndex;
+            nextIndex += 1;
+
+            if (currentIndex >= items.length) {
+                return;
+            }
+
+            results[currentIndex] = await workerFn(items[currentIndex], currentIndex);
+        }
+    }
+
+    const workers = Array.from(
+        { length: Math.min(concurrency, items.length) },
+        () => worker()
+    );
+
+    await Promise.all(workers);
+    return results;
+}
+
 // ========== MAIN ACTOR ==========
 Actor.main(async () => {
     const log = Actor.log;
@@ -393,46 +447,55 @@ Actor.main(async () => {
         const OUTPUT_CONTRACT = await loadOutputContract();
         const input = await Actor.getInput();
         const urls = normalizeInputToUrls(input);
+        const concurrency = normalizeConcurrency(input);
 
-        const results = [];
+        log?.info('Parallel processing configuration', {
+            urlCount: urls.length,
+            concurrency,
+        }) || console.log('Parallel processing configuration', { urlCount: urls.length, concurrency });
 
-        for (const targetUrl of urls) {
-            try {
-                const result = await processUrl(targetUrl, OUTPUT_CONTRACT, log);
-                results.push(result);
-            } catch (err) {
-                const failedItem = {
-                    added: [],
-                    removed: [],
-                    modified: [],
-                    severity: 'none',
-                    summary: {
-                        totalChanges: 0,
-                        addedCount: 0,
-                        removedCount: 0,
-                        modifiedCount: 0,
-                    },
-                    summaryText: `Unhandled processing error for ${targetUrl}: ${err.message}`,
-                    hasSemanticChange: false,
-                    confidence: 0,
-                    timestamp: new Date().toISOString(),
-                    url: targetUrl,
-                    fetchStatus: 'failed',
-                    fetchError: err.message,
-                };
+        const results = await runWithConcurrencyLimit(
+            urls,
+            concurrency,
+            async (targetUrl) => {
+                try {
+                    return await processUrl(targetUrl, OUTPUT_CONTRACT, log);
+                } catch (err) {
+                    const failedItem = {
+                        added: [],
+                        removed: [],
+                        modified: [],
+                        severity: 'none',
+                        summary: {
+                            totalChanges: 0,
+                            addedCount: 0,
+                            removedCount: 0,
+                            modifiedCount: 0,
+                        },
+                        summaryText: `Unhandled processing error for ${targetUrl}: ${err.message}`,
+                        hasSemanticChange: false,
+                        confidence: 0,
+                        timestamp: new Date().toISOString(),
+                        url: targetUrl,
+                        fetchStatus: 'failed',
+                        fetchError: err.message,
+                    };
 
-                await Actor.pushData(failedItem);
-                results.push(failedItem);
+                    await Actor.pushData(failedItem);
 
-                log?.error('URL processing failed', { url: targetUrl, error: err.message }) ||
-                    console.error('URL processing failed', targetUrl, err.message);
+                    log?.error('URL processing failed', { url: targetUrl, error: err.message }) ||
+                        console.error('URL processing failed', targetUrl, err.message);
+
+                    return failedItem;
+                }
             }
-        }
+        );
 
         const runSummary = {
             processedUrls: urls.length,
             successfulUrls: results.filter((item) => item.fetchStatus !== 'failed').length,
             failedUrls: results.filter((item) => item.fetchStatus === 'failed').length,
+            concurrencyUsed: concurrency,
             urls,
             timestamp: new Date().toISOString(),
         };
