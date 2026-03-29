@@ -15,6 +15,7 @@ import { scorePolicyRisk } from './src/intelligence/riskScorer.js';
 import { formatDashboardView } from './src/presentation/dashboardFormatter.js';
 import { formatAlertPayload } from './src/presentation/alertFormatter.js';
 import { formatClientReport } from './src/presentation/reportFormatter.js';
+import { sendWebhookAlert } from './src/notifications/webhookNotifier.js';
 
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
 function validateAgainstContract(output, OUTPUT_CONTRACT) {
@@ -560,6 +561,44 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     output.snapshotKey = snapshotKey;
     output.fetchStatus = 'success';
 
+    // STEP 6.5 — Send important alerts only
+    const webhookUrl = process.env.WEBHOOK_URL || null;
+
+    if (
+        webhookUrl &&
+        output?.alertPayload &&
+        (
+            output.alertPayload.priority === 'p0' ||
+            output.alertPayload.priority === 'p1' ||
+            output.alertPayload.requiresHumanReview
+        )
+    ) {
+        const webhookResult = await sendWebhookAlert(webhookUrl, output.alertPayload);
+
+        output.webhookDelivery = {
+            attempted: true,
+            ...webhookResult,
+            deliveredAt: new Date().toISOString(),
+        };
+
+        log?.info('Webhook alert processed', {
+            url: targetUrl,
+            priority: output.alertPayload.priority,
+            requiresHumanReview: output.alertPayload.requiresHumanReview,
+            webhookSuccess: webhookResult?.success || false,
+            webhookSkipped: webhookResult?.skipped || false,
+        }) || console.log('Webhook alert processed', targetUrl);
+    } else {
+        output.webhookDelivery = {
+            attempted: false,
+            skipped: true,
+            reason: !webhookUrl
+                ? 'No webhook URL provided'
+                : 'Alert did not meet send threshold',
+            deliveredAt: null,
+        };
+    }
+
     // ========== STORAGE ==========
     await Actor.setValue(outputKey, output);
     await Actor.setValue(diffKey, semanticDiff);
@@ -578,6 +617,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         isFirstSeen,
         outputKey,
         riskScore: riskAssessment.riskScore,
+        webhookAttempted: output.webhookDelivery?.attempted || false,
     }) || console.log('Processed URL successfully', targetUrl);
 
     return output;
@@ -718,6 +758,12 @@ Actor.main(async () => {
                                 keyFindings: '- Policy analysis did not complete successfully.',
                                 source: targetUrl,
                             },
+                        },
+                        webhookDelivery: {
+                            attempted: false,
+                            skipped: true,
+                            reason: 'Processing failed before webhook stage',
+                            deliveredAt: null,
                         },
                     };
 
