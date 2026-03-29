@@ -29,6 +29,10 @@ import {
     recordDigestDelivery,
 } from './src/notifications/digestManager.js';
 import { formatSlackPayload } from './src/notifications/slackFormatter.js';
+import {
+    resolveDeliveryPreferences,
+    evaluateDeliveryPreferences,
+} from './src/delivery/deliveryPreferences.js';
 
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
 function validateAgainstContract(output, OUTPUT_CONTRACT) {
@@ -387,8 +391,20 @@ function normalizeConcurrency(input) {
     return Math.max(1, Math.min(Math.floor(parsedNumber), 5));
 }
 
+// ========== DELIVERY CONTEXT HELPERS ==========
+function extractDeliveryContext(input) {
+    return {
+        tenantId: typeof input?.tenantId === 'string' ? input.tenantId.trim() : null,
+        userId: typeof input?.userId === 'string' ? input.userId.trim() : null,
+        inlinePreferences:
+            input?.deliveryPreferences && typeof input.deliveryPreferences === 'object'
+                ? input.deliveryPreferences
+                : null,
+    };
+}
+
 // ========== SINGLE URL PROCESSOR ==========
-async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
+async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {}) {
     const snapshotKey = buildSnapshotKey(targetUrl);
     const currentSnapshotKey = buildCurrentSnapshotKey(targetUrl);
     const diffKey = buildDiffKey(targetUrl);
@@ -508,6 +524,10 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                 reason: 'Fetch failed before escalation evaluation',
                 escalationWindowHours: Number(process.env.ALERT_ESCALATION_WINDOW_HOURS || 24),
             },
+            deliveryDecision: {
+                route: 'skip',
+                reason: 'Fetch failed before delivery preference evaluation',
+            },
             digestRouting: {
                 mode: 'none',
                 reason: 'Fetch failed before digest evaluation',
@@ -589,6 +609,14 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     output.snapshotKey = snapshotKey;
     output.fetchStatus = 'success';
 
+    const resolvedDelivery = await resolveDeliveryPreferences(deliveryContext);
+    output.deliveryPreferences = {
+        tenantId: resolvedDelivery.tenantId,
+        userId: resolvedDelivery.userId,
+        sources: resolvedDelivery.sources,
+        effective: resolvedDelivery.preferences,
+    };
+
     const webhookUrl = process.env.WEBHOOK_URL || null;
     const alertCooldownMinutes = Number(process.env.ALERT_COOLDOWN_MINUTES || 60);
     const alertEscalationWindowHours = Number(process.env.ALERT_ESCALATION_WINDOW_HOURS || 24);
@@ -629,13 +657,26 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                 finalAlertPayload.reviewWindow || output.riskAssessment.reviewWindow;
         }
 
-        const useImmediateDelivery = shouldUseImmediateDelivery(finalAlertPayload);
-        const useDigestDelivery = !useImmediateDelivery && shouldQueueForDigest(finalAlertPayload);
+        const preferenceDecision = evaluateDeliveryPreferences({
+            url: targetUrl,
+            alertPayload: finalAlertPayload,
+            preferences: resolvedDelivery.preferences,
+        });
+
+        output.deliveryDecision = preferenceDecision;
+
+        const useImmediateDelivery =
+            preferenceDecision.route === 'immediate' &&
+            shouldUseImmediateDelivery(finalAlertPayload);
+
+        const useDigestDelivery =
+            preferenceDecision.route === 'digest' &&
+            shouldQueueForDigest(finalAlertPayload);
 
         if (useImmediateDelivery) {
             output.digestRouting = {
                 mode: 'immediate',
-                reason: 'Alert met immediate delivery threshold',
+                reason: preferenceDecision.reason,
             };
 
             const dedupDecision = await evaluateAlertDedup({
@@ -688,6 +729,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                     webhookSuccess: webhookResult?.success || false,
                     dedupReason: dedupDecision.reason,
                     escalated: escalationDecision.escalated,
+                    preferenceReason: preferenceDecision.reason,
                 }) || console.log('Immediate Slack alert processed', targetUrl);
             } else {
                 output.webhookDelivery = {
@@ -709,6 +751,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                     priority: finalAlertPayload.priority,
                     dedupReason: dedupDecision.reason,
                     lastSentAt: dedupDecision.lastSentAt,
+                    preferenceReason: preferenceDecision.reason,
                 }) || console.log('Immediate Slack alert skipped by dedup layer', targetUrl);
             }
         } else if (useDigestDelivery) {
@@ -730,7 +773,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                 mode: 'digest',
                 reason: digestDecision.shouldSendDigest
                     ? `Digest ready via ${digestDecision.trigger}`
-                    : 'Alert queued for digest delivery',
+                    : preferenceDecision.reason,
                 channel: digestChannel,
                 queueCount: digestDecision.queueCount,
                 duplicateSkipped: digestDecision.duplicateSkipped,
@@ -779,6 +822,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                     queueCount: digestDecision.queueCount,
                     trigger: digestDecision.trigger,
                     digestSuccess: digestWebhookResult?.success || false,
+                    preferenceReason: preferenceDecision.reason,
                 }) || console.log('Slack digest processed', targetUrl);
             } else {
                 output.digestDelivery = {
@@ -802,31 +846,32 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                     url: targetUrl,
                     queueCount: digestDecision.queueCount,
                     duplicateSkipped: digestDecision.duplicateSkipped,
+                    preferenceReason: preferenceDecision.reason,
                 }) || console.log('Alert queued for Slack digest delivery', targetUrl);
             }
         } else {
             output.alertDedup = {
                 shouldSend: false,
-                reason: 'Alert did not qualify for immediate or digest delivery',
+                reason: preferenceDecision.reason,
                 cooldownMinutes: alertCooldownMinutes,
             };
 
             output.digestRouting = {
                 mode: 'none',
-                reason: 'Alert did not qualify for immediate or digest delivery',
+                reason: preferenceDecision.reason,
             };
 
             output.digestDelivery = {
                 attempted: false,
                 skipped: true,
-                reason: 'Alert did not qualify for digest delivery',
+                reason: preferenceDecision.reason,
                 deliveredAt: null,
             };
 
             output.webhookDelivery = {
                 attempted: false,
                 skipped: true,
-                reason: 'Alert did not qualify for immediate delivery',
+                reason: preferenceDecision.reason,
                 deliveredAt: null,
             };
         }
@@ -837,6 +882,13 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                 ? 'No webhook URL provided'
                 : 'No alert payload available',
             escalationWindowHours: alertEscalationWindowHours,
+        };
+
+        output.deliveryDecision = {
+            route: 'skip',
+            reason: !webhookUrl
+                ? 'No webhook URL provided'
+                : 'No alert payload available',
         };
 
         output.alertDedup = {
@@ -892,6 +944,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         webhookAttempted: output.webhookDelivery?.attempted || false,
         digestAttempted: output.digestDelivery?.attempted || false,
         escalated: output.alertEscalation?.escalated || false,
+        deliveryRoute: output.deliveryDecision?.route || 'skip',
     }) || console.log('Processed URL successfully', targetUrl);
 
     return output;
@@ -933,6 +986,7 @@ Actor.main(async () => {
 
         const OUTPUT_CONTRACT = await loadOutputContract();
         const input = await Actor.getInput();
+        const deliveryContext = extractDeliveryContext(input);
         const urls = normalizeInputToUrls(input);
         const concurrency = normalizeConcurrency(input);
 
@@ -946,7 +1000,12 @@ Actor.main(async () => {
             concurrency,
             async (targetUrl) => {
                 try {
-                    return await processUrl(targetUrl, OUTPUT_CONTRACT, log);
+                    return await processUrl(
+                        targetUrl,
+                        OUTPUT_CONTRACT,
+                        log,
+                        deliveryContext
+                    );
                 } catch (err) {
                     const failedItem = {
                         added: [],
@@ -1042,6 +1101,10 @@ Actor.main(async () => {
                             escalated: false,
                             reason: 'Processing failed before escalation evaluation',
                             escalationWindowHours: Number(process.env.ALERT_ESCALATION_WINDOW_HOURS || 24),
+                        },
+                        deliveryDecision: {
+                            route: 'skip',
+                            reason: 'Processing failed before delivery preference evaluation',
                         },
                         digestRouting: {
                             mode: 'none',
