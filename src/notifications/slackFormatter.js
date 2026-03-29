@@ -17,7 +17,6 @@ function slackLink(url, label = 'View policy') {
     const safeLabel = slackEscape(label || 'View policy');
 
     if (!safeUrl) return safeLabel;
-
     return `<${safeUrl}|${safeLabel}>`;
 }
 
@@ -71,6 +70,19 @@ function priorityRank(priority = 'p4') {
     }
 }
 
+function businessImpactRank(impact = 'low') {
+    switch (impact) {
+        case 'critical':
+            return 0;
+        case 'high':
+            return 1;
+        case 'medium':
+            return 2;
+        default:
+            return 3;
+    }
+}
+
 function buildDriverList(drivers = [], max = 3) {
     const items = safeArray(drivers, max);
     if (!items.length) return '• No top drivers supplied';
@@ -85,7 +97,6 @@ function buildImmediateSlackPayload(alertPayload = {}) {
     const severity = alertPayload.severity || 'none';
     const icon = emojiForPriority(priority);
     const severityIcon = emojiForSeverity(severity);
-
     const driverText = buildDriverList(alertPayload.topDrivers, 3);
 
     const fallbackText =
@@ -106,30 +117,12 @@ function buildImmediateSlackPayload(alertPayload = {}) {
             {
                 type: 'section',
                 fields: [
-                    {
-                        type: 'mrkdwn',
-                        text: `*Priority*\n${slackEscape(priority.toUpperCase())}`,
-                    },
-                    {
-                        type: 'mrkdwn',
-                        text: `*Severity*\n${severityIcon} ${slackEscape(severity.toUpperCase())}`,
-                    },
-                    {
-                        type: 'mrkdwn',
-                        text: `*Risk Score*\n${slackEscape(alertPayload.riskScore ?? 0)}`,
-                    },
-                    {
-                        type: 'mrkdwn',
-                        text: `*Business Impact*\n${slackEscape((alertPayload.businessImpact || 'low').toUpperCase())}`,
-                    },
-                    {
-                        type: 'mrkdwn',
-                        text: `*Review Window*\n${slackEscape(alertPayload.reviewWindow || 'monitor')}`,
-                    },
-                    {
-                        type: 'mrkdwn',
-                        text: `*Human Review*\n${alertPayload.requiresHumanReview ? 'Yes' : 'No'}`,
-                    },
+                    { type: 'mrkdwn', text: `*Priority*\n${slackEscape(priority.toUpperCase())}` },
+                    { type: 'mrkdwn', text: `*Severity*\n${severityIcon} ${slackEscape(severity.toUpperCase())}` },
+                    { type: 'mrkdwn', text: `*Risk Score*\n${slackEscape(alertPayload.riskScore ?? 0)}` },
+                    { type: 'mrkdwn', text: `*Business Impact*\n${slackEscape((alertPayload.businessImpact || 'low').toUpperCase())}` },
+                    { type: 'mrkdwn', text: `*Review Window*\n${slackEscape(alertPayload.reviewWindow || 'monitor')}` },
+                    { type: 'mrkdwn', text: `*Human Review*\n${alertPayload.requiresHumanReview ? 'Yes' : 'No'}` },
                 ],
             },
             {
@@ -251,11 +244,6 @@ function flattenUrgentEntries(groupedEntries = []) {
             const priorityCompare = priorityRank(a.priority) - priorityRank(b.priority);
             if (priorityCompare !== 0) return priorityCompare;
 
-            const aReview = String(a.reviewWindow || '');
-            const bReview = String(b.reviewWindow || '');
-            if (aReview === 'immediate' && bReview !== 'immediate') return -1;
-            if (bReview === 'immediate' && aReview !== 'immediate') return 1;
-
             const aTime = new Date(a.queuedAt || 0).getTime();
             const bTime = new Date(b.queuedAt || 0).getTime();
             return aTime - bTime;
@@ -325,6 +313,92 @@ function buildBusinessImpactSummarySection(businessImpactSummary = {}) {
     ];
 }
 
+function isLowSignalGroup(group = {}) {
+    const highestPriority = group.highestPriority || 'p4';
+    const highestBusinessImpact = group.highestBusinessImpact || 'low';
+    const topUrgentItem = group.topUrgentItem || null;
+
+    const hasHumanReview = Boolean(topUrgentItem?.requiresHumanReview);
+    const urgentReviewWindow =
+        topUrgentItem?.reviewWindow === 'immediate' ||
+        topUrgentItem?.reviewWindow === '24h';
+
+    return (
+        priorityRank(highestPriority) >= 3 &&
+        businessImpactRank(highestBusinessImpact) >= 2 &&
+        !hasHumanReview &&
+        !urgentReviewWindow
+    );
+}
+
+function splitGroupsBySignal(groupedEntries = []) {
+    const expandedGroups = [];
+    const collapsedGroups = [];
+
+    for (const group of groupedEntries) {
+        if (isLowSignalGroup(group)) {
+            collapsedGroups.push(group);
+        } else {
+            expandedGroups.push(group);
+        }
+    }
+
+    return { expandedGroups, collapsedGroups };
+}
+
+function buildCollapsedGroupSummaryLine(group = {}) {
+    const icon = emojiForPriority(group.highestPriority || 'p4');
+    const impact = group.highestBusinessImpact || 'low';
+    const text =
+        `${icon} *${slackEscape(group.primaryType || 'Unknown')}* — ` +
+        `${slackEscape(group.itemCount ?? 0)} alerts · ` +
+        `highest ${slackEscape((group.highestPriority || 'p4').toUpperCase())} · ` +
+        `impact ${slackEscape(String(impact).toUpperCase())}`;
+
+    return {
+        type: 'section',
+        text: {
+            type: 'mrkdwn',
+            text,
+        },
+    };
+}
+
+function buildCollapsedGroupsSection(collapsedGroups = []) {
+    if (!collapsedGroups.length) {
+        return [];
+    }
+
+    const blocks = [
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: '*Collapsed Low-Signal Groups*',
+            },
+        },
+    ];
+
+    for (const group of collapsedGroups.slice(0, 8)) {
+        blocks.push(buildCollapsedGroupSummaryLine(group));
+    }
+
+    if (collapsedGroups.length > 8) {
+        blocks.push({
+            type: 'context',
+            elements: [
+                {
+                    type: 'mrkdwn',
+                    text: `Showing first 8 of ${slackEscape(collapsedGroups.length)} collapsed low-signal groups.`,
+                },
+            ],
+        });
+    }
+
+    blocks.push({ type: 'divider' });
+    return blocks;
+}
+
 function buildGroupedDigestBlocks(groupedEntries = []) {
     const blocks = [];
 
@@ -350,6 +424,8 @@ function buildDigestSlackPayload(digestPayload = {}) {
     const entries = Array.isArray(digestPayload.entries) ? digestPayload.entries : [];
     const highest = digestPayload.highestPriority || 'p4';
     const icon = emojiForPriority(highest);
+
+    const { expandedGroups, collapsedGroups } = splitGroupsBySignal(groupedEntries);
 
     const blocks = [
         {
@@ -396,8 +472,9 @@ function buildDigestSlackPayload(digestPayload = {}) {
     ];
 
     if (groupedEntries.length > 0) {
-        blocks.push(...buildUrgentDigestSection(groupedEntries));
-        blocks.push(...buildGroupedDigestBlocks(groupedEntries));
+        blocks.push(...buildUrgentDigestSection(expandedGroups.length ? expandedGroups : groupedEntries));
+        blocks.push(...buildGroupedDigestBlocks(expandedGroups));
+        blocks.push(...buildCollapsedGroupsSection(collapsedGroups));
     } else {
         for (const entry of entries.slice(0, 10)) {
             blocks.push(buildDigestEntry(entry));
@@ -405,13 +482,13 @@ function buildDigestSlackPayload(digestPayload = {}) {
         }
     }
 
-    if (groupedEntries.length > 8) {
+    if (expandedGroups.length > 8) {
         blocks.push({
             type: 'context',
             elements: [
                 {
                     type: 'mrkdwn',
-                    text: `Showing first 8 policy-type groups of ${slackEscape(groupedEntries.length)} total groups.`,
+                    text: `Showing first 8 expanded policy-type groups of ${slackEscape(expandedGroups.length)} total expanded groups.`,
                 },
             ],
         });
