@@ -399,17 +399,82 @@ function buildCollapsedGroupsSection(collapsedGroups = []) {
     return blocks;
 }
 
+function entryCapForGroup(group = {}) {
+    const highestPriority = group.highestPriority || 'p4';
+    const highestBusinessImpact = group.highestBusinessImpact || 'low';
+    const topUrgentItem = group.topUrgentItem || null;
+
+    if (
+        highestPriority === 'p0' ||
+        highestBusinessImpact === 'critical' ||
+        topUrgentItem?.reviewWindow === 'immediate'
+    ) {
+        return 6;
+    }
+
+    if (
+        highestPriority === 'p1' ||
+        highestBusinessImpact === 'high' ||
+        topUrgentItem?.reviewWindow === '24h'
+    ) {
+        return 5;
+    }
+
+    if (
+        highestPriority === 'p2' ||
+        highestBusinessImpact === 'medium'
+    ) {
+        return 4;
+    }
+
+    return 3;
+}
+
+function buildGroupOverflowSummary(group = {}, shownCount = 0) {
+    const total = Number(group.itemCount || 0);
+    const remaining = total - shownCount;
+
+    if (remaining <= 0) {
+        return [];
+    }
+
+    return [
+        {
+            type: 'context',
+            elements: [
+                {
+                    type: 'mrkdwn',
+                    text:
+                        `Showing ${slackEscape(shownCount)} of ${slackEscape(total)} items in ` +
+                        `*${slackEscape(group.primaryType || 'Unknown')}*. ` +
+                        `${slackEscape(remaining)} additional item${remaining === 1 ? '' : 's'} not shown.`,
+                },
+            ],
+        },
+        {
+            type: 'divider',
+        },
+    ];
+}
+
 function buildGroupedDigestBlocks(groupedEntries = []) {
     const blocks = [];
 
     for (const group of groupedEntries.slice(0, 8)) {
         blocks.push(buildPolicyTypeGroupHeader(group));
 
-        for (const entry of (group.entries || []).slice(0, 5)) {
+        const cap = entryCapForGroup(group);
+        const visibleEntries = (group.entries || []).slice(0, cap);
+
+        for (const entry of visibleEntries) {
             blocks.push(buildDigestEntry(entry));
         }
 
-        blocks.push({ type: 'divider' });
+        blocks.push(...buildGroupOverflowSummary(group, visibleEntries.length));
+
+        if ((group.itemCount || 0) <= visibleEntries.length) {
+            blocks.push({ type: 'divider' });
+        }
     }
 
     return blocks;
