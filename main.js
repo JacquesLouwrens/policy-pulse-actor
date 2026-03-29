@@ -9,6 +9,7 @@ import { fetchPolicyText } from './src/fetchers/policyFetcher.js';
 import { extractSemanticMeaning } from './src/intelligence/semanticEngine.js';
 import { detectSemanticChange } from './src/intelligence/changeDetector.js';
 import { generateSignals } from './src/signals/signalGenerator.js';
+import { classifyPolicyType } from './src/intelligence/policyClassifier.js';
 
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
 function validateAgainstContract(output, OUTPUT_CONTRACT) {
@@ -109,7 +110,7 @@ function calculateConfidence(semanticDiff, signals) {
 }
 
 // ========== OUTPUT GENERATOR ==========
-async function generateOutput(semanticDiff, signals, url, OUTPUT_CONTRACT) {
+async function generateOutput(semanticDiff, signals, url, OUTPUT_CONTRACT, policyClassification = null) {
     const output = {
         added: semanticDiff.added || [],
         removed: semanticDiff.removed || [],
@@ -138,6 +139,10 @@ async function generateOutput(semanticDiff, signals, url, OUTPUT_CONTRACT) {
         timestamp: new Date().toISOString(),
         url,
     };
+
+    if (policyClassification) {
+        output.policyClassification = policyClassification;
+    }
 
     validateAgainstContract(output, OUTPUT_CONTRACT);
     return output;
@@ -181,7 +186,6 @@ function buildOutputKey(url) {
 function normalizeInputToUrls(input) {
     let parsedInput = input;
 
-    // Case 1: whole input is a string
     if (typeof parsedInput === 'string') {
         const trimmed = parsedInput.trim();
 
@@ -199,7 +203,6 @@ function normalizeInputToUrls(input) {
         }
     }
 
-    // Case 2: input.url itself contains a stringified JSON object
     if (typeof parsedInput?.url === 'string') {
         const trimmedUrl = parsedInput.url.trim();
 
@@ -214,7 +217,7 @@ function normalizeInputToUrls(input) {
                     parsedInput = reparsed;
                 }
             } catch {
-                // leave as-is if it isn't valid JSON
+                // leave as-is
             }
         }
     }
@@ -345,6 +348,13 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
             fetchStatus: 'failed',
             fetchError: fetchError.message,
             snapshotKey,
+            policyClassification: {
+                primaryType: 'Unknown',
+                secondaryTypes: [],
+                verticals: [],
+                confidence: 0,
+                matches: [],
+            },
         };
 
         await Actor.setValue(outputKey, blockedOutput);
@@ -367,6 +377,9 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     // STEP 3 — Extract current semantic meaning
     const currentSemantic = extractSemanticMeaning(rawText);
 
+    // STEP 3.5 — Classify policy type
+    const policyClassification = classifyPolicyType(rawText, targetUrl);
+
     // STEP 4 — Detect semantic change
     const semanticDiff = detectSemanticChange(previousSemantic, currentSemantic);
 
@@ -378,6 +391,8 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         snapshotKey,
         previousTopics: previousSemantic.topics?.length || 0,
         currentTopics: currentSemantic.topics?.length || 0,
+        primaryPolicyType: policyClassification.primaryType,
+        classificationConfidence: policyClassification.confidence,
     }) || console.log('Semantic processing completed');
 
     // STEP 6 — Generate output
@@ -385,7 +400,8 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         semanticDiff,
         signals,
         targetUrl,
-        OUTPUT_CONTRACT
+        OUTPUT_CONTRACT,
+        policyClassification
     );
 
     output.snapshotKey = snapshotKey;
@@ -479,6 +495,13 @@ Actor.main(async () => {
                         url: targetUrl,
                         fetchStatus: 'failed',
                         fetchError: err.message,
+                        policyClassification: {
+                            primaryType: 'Unknown',
+                            secondaryTypes: [],
+                            verticals: [],
+                            confidence: 0,
+                            matches: [],
+                        },
                     };
 
                     await Actor.pushData(failedItem);
