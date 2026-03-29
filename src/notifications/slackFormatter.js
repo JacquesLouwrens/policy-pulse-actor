@@ -459,12 +459,18 @@ function buildGroupOverflowSummary(group = {}, shownCount = 0) {
 
 function buildGroupedDigestBlocks(groupedEntries = []) {
     const blocks = [];
+    let visibleEntriesShown = 0;
+    let hiddenEntriesNotShown = 0;
 
     for (const group of groupedEntries.slice(0, 8)) {
         blocks.push(buildPolicyTypeGroupHeader(group));
 
         const cap = entryCapForGroup(group);
         const visibleEntries = (group.entries || []).slice(0, cap);
+        const hiddenCount = Math.max((group.itemCount || 0) - visibleEntries.length, 0);
+
+        visibleEntriesShown += visibleEntries.length;
+        hiddenEntriesNotShown += hiddenCount;
 
         for (const entry of visibleEntries) {
             blocks.push(buildDigestEntry(entry));
@@ -477,7 +483,49 @@ function buildGroupedDigestBlocks(groupedEntries = []) {
         }
     }
 
-    return blocks;
+    return {
+        blocks,
+        visibleEntriesShown,
+        hiddenEntriesNotShown,
+    };
+}
+
+function buildDigestFooterRollup({
+    expandedGroupCount = 0,
+    collapsedGroupCount = 0,
+    visibleEntriesShown = 0,
+    hiddenEntriesNotShown = 0,
+}) {
+    return [
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: '*Digest Rollup*',
+            },
+        },
+        {
+            type: 'section',
+            fields: [
+                {
+                    type: 'mrkdwn',
+                    text: `*Expanded Groups*\n${slackEscape(expandedGroupCount)}`,
+                },
+                {
+                    type: 'mrkdwn',
+                    text: `*Collapsed Groups*\n${slackEscape(collapsedGroupCount)}`,
+                },
+                {
+                    type: 'mrkdwn',
+                    text: `*Visible Entries Shown*\n${slackEscape(visibleEntriesShown)}`,
+                },
+                {
+                    type: 'mrkdwn',
+                    text: `*Hidden Entries Not Shown*\n${slackEscape(hiddenEntriesNotShown)}`,
+                },
+            ],
+        },
+    ];
 }
 
 function buildDigestSlackPayload(digestPayload = {}) {
@@ -491,6 +539,7 @@ function buildDigestSlackPayload(digestPayload = {}) {
     const icon = emojiForPriority(highest);
 
     const { expandedGroups, collapsedGroups } = splitGroupsBySignal(groupedEntries);
+    const expandedRender = buildGroupedDigestBlocks(expandedGroups);
 
     const blocks = [
         {
@@ -538,8 +587,16 @@ function buildDigestSlackPayload(digestPayload = {}) {
 
     if (groupedEntries.length > 0) {
         blocks.push(...buildUrgentDigestSection(expandedGroups.length ? expandedGroups : groupedEntries));
-        blocks.push(...buildGroupedDigestBlocks(expandedGroups));
+        blocks.push(...expandedRender.blocks);
         blocks.push(...buildCollapsedGroupsSection(collapsedGroups));
+        blocks.push(
+            ...buildDigestFooterRollup({
+                expandedGroupCount: expandedGroups.length,
+                collapsedGroupCount: collapsedGroups.length,
+                visibleEntriesShown: expandedRender.visibleEntriesShown,
+                hiddenEntriesNotShown: expandedRender.hiddenEntriesNotShown,
+            })
+        );
     } else {
         for (const entry of entries.slice(0, 10)) {
             blocks.push(buildDigestEntry(entry));
