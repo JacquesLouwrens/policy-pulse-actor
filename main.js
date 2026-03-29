@@ -181,10 +181,14 @@ function buildOutputKey(url) {
 function normalizeInputToUrls(input) {
     let parsedInput = input;
 
+    // Case 1: whole input is a string
     if (typeof parsedInput === 'string') {
         const trimmed = parsedInput.trim();
 
-        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        if (
+            (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+            (trimmed.startsWith('[') && trimmed.endsWith(']'))
+        ) {
             try {
                 parsedInput = JSON.parse(trimmed);
             } catch {
@@ -195,25 +199,74 @@ function normalizeInputToUrls(input) {
         }
     }
 
+    // Case 2: input.url itself contains a stringified JSON object
+    if (typeof parsedInput?.url === 'string') {
+        const trimmedUrl = parsedInput.url.trim();
+
+        if (
+            (trimmedUrl.startsWith('{') && trimmedUrl.endsWith('}')) ||
+            (trimmedUrl.startsWith('[') && trimmedUrl.endsWith(']'))
+        ) {
+            try {
+                const reparsed = JSON.parse(trimmedUrl);
+
+                // Merge reparsed content back in if it looks like structured input
+                if (typeof reparsed === 'object' && reparsed !== null) {
+                    parsedInput = reparsed;
+                }
+            } catch {
+                // leave as-is if it isn't valid JSON
+            }
+        }
+    }
+
     const urls = [];
 
-    if (parsedInput?.url && typeof parsedInput.url === 'string') {
+    if (typeof parsedInput?.url === 'string') {
         urls.push(parsedInput.url);
     }
 
     if (Array.isArray(parsedInput?.urls)) {
         for (const value of parsedInput.urls) {
             if (typeof value === 'string') {
-                urls.push(value);
+                const trimmed = value.trim();
+
+                // handle accidentally nested JSON strings inside urls array
+                if (
+                    (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+                    (trimmed.startsWith('[') && trimmed.endsWith(']'))
+                ) {
+                    try {
+                        const reparsed = JSON.parse(trimmed);
+
+                        if (typeof reparsed?.url === 'string') {
+                            urls.push(reparsed.url);
+                        }
+
+                        if (Array.isArray(reparsed?.urls)) {
+                            for (const nested of reparsed.urls) {
+                                if (typeof nested === 'string') {
+                                    urls.push(nested);
+                                }
+                            }
+                        }
+                    } catch {
+                        urls.push(trimmed);
+                    }
+                } else {
+                    urls.push(trimmed);
+                }
             }
         }
     }
 
-    const cleanedUrls = [...new Set(
-        urls
-            .map((url) => url.trim())
-            .filter(Boolean)
-    )];
+    const cleanedUrls = [
+        ...new Set(
+            urls
+                .map((url) => url.trim())
+                .filter(Boolean)
+        ),
+    ];
 
     if (cleanedUrls.length === 0) {
         throw new Error('Input must include "url" (string) or "urls" (array of strings).');
