@@ -79,6 +79,46 @@ function summarizeCounts(items = []) {
     return summary;
 }
 
+function groupEntriesByPolicyType(items = []) {
+    const groupsMap = new Map();
+
+    for (const item of items) {
+        const primaryType = normalizeString(item.primaryType) || 'Unknown';
+
+        if (!groupsMap.has(primaryType)) {
+            groupsMap.set(primaryType, []);
+        }
+
+        groupsMap.get(primaryType).push(item);
+    }
+
+    const groups = Array.from(groupsMap.entries()).map(([primaryType, entries]) => {
+        const sortedEntries = [...entries].sort((a, b) => {
+            const priorityCompare = priorityRank(a.priority) - priorityRank(b.priority);
+            if (priorityCompare !== 0) return priorityCompare;
+
+            const aTime = new Date(a.queuedAt || 0).getTime();
+            const bTime = new Date(b.queuedAt || 0).getTime();
+            return aTime - bTime;
+        });
+
+        return {
+            primaryType,
+            itemCount: sortedEntries.length,
+            highestPriority: highestPriority(sortedEntries),
+            summary: summarizeCounts(sortedEntries),
+            entries: sortedEntries,
+        };
+    });
+
+    return groups.sort((a, b) => {
+        const priorityCompare = priorityRank(a.highestPriority) - priorityRank(b.highestPriority);
+        if (priorityCompare !== 0) return priorityCompare;
+
+        return b.itemCount - a.itemCount;
+    });
+}
+
 function buildDigestPayload({
     channel,
     items,
@@ -88,6 +128,7 @@ function buildDigestPayload({
 }) {
     const counts = summarizeCounts(items);
     const highest = highestPriority(items);
+    const groups = groupEntriesByPolicyType(items);
 
     return {
         channel,
@@ -105,6 +146,7 @@ function buildDigestPayload({
             windowMinutes,
             maxItems,
         },
+        groupedEntries: groups,
         entries: items.map((item) => ({
             url: item.url,
             headline: item.headline,

@@ -164,7 +164,7 @@ function buildDigestEntry(entry = {}) {
         `• Priority: ${slackEscape((entry.priority || 'p4').toUpperCase())} | ` +
         `Severity: ${slackEscape((entry.severity || 'none').toUpperCase())} | ` +
         `Impact: ${slackEscape((entry.businessImpact || 'low').toUpperCase())}\n` +
-        `• Type: ${slackEscape(entry.primaryType || 'Unknown')} | Review: ${slackEscape(entry.reviewWindow || 'monitor')}\n` +
+        `• Review: ${slackEscape(entry.reviewWindow || 'monitor')}\n` +
         `• Drivers: ${truncate(drivers, 180)}\n` +
         `• Action: ${truncate(slackEscape(entry.recommendedAction || 'No action provided.'), 220)}\n` +
         `• ${slackLink(entry.url, 'Open policy')}`;
@@ -178,8 +178,51 @@ function buildDigestEntry(entry = {}) {
     };
 }
 
+function buildPolicyTypeGroupHeader(group = {}) {
+    const icon = emojiForPriority(group.highestPriority || 'p4');
+    const summary = group.summary || {};
+
+    const text =
+        `${icon} *${slackEscape(group.primaryType || 'Unknown')}*\n` +
+        `• Alerts: ${slackEscape(group.itemCount ?? 0)} | ` +
+        `Highest: ${slackEscape((group.highestPriority || 'p4').toUpperCase())}\n` +
+        `• P0/P1/P2/P3/P4: ` +
+        `${slackEscape(summary.p0 ?? 0)}/` +
+        `${slackEscape(summary.p1 ?? 0)}/` +
+        `${slackEscape(summary.p2 ?? 0)}/` +
+        `${slackEscape(summary.p3 ?? 0)}/` +
+        `${slackEscape(summary.p4 ?? 0)}`;
+
+    return {
+        type: 'section',
+        text: {
+            type: 'mrkdwn',
+            text,
+        },
+    };
+}
+
+function buildGroupedDigestBlocks(groupedEntries = []) {
+    const blocks = [];
+
+    for (const group of groupedEntries.slice(0, 8)) {
+        blocks.push(buildPolicyTypeGroupHeader(group));
+
+        for (const entry of (group.entries || []).slice(0, 5)) {
+            blocks.push(buildDigestEntry(entry));
+        }
+
+        blocks.push({ type: 'divider' });
+    }
+
+    return blocks;
+}
+
 function buildDigestSlackPayload(digestPayload = {}) {
     const summary = digestPayload.summary || {};
+    const groupedEntries = Array.isArray(digestPayload.groupedEntries)
+        ? digestPayload.groupedEntries
+        : [];
     const entries = Array.isArray(digestPayload.entries) ? digestPayload.entries : [];
     const highest = digestPayload.highestPriority || 'p4';
     const icon = emojiForPriority(highest);
@@ -227,12 +270,26 @@ function buildDigestSlackPayload(digestPayload = {}) {
         },
     ];
 
-    for (const entry of entries.slice(0, 10)) {
-        blocks.push(buildDigestEntry(entry));
-        blocks.push({ type: 'divider' });
+    if (groupedEntries.length > 0) {
+        blocks.push(...buildGroupedDigestBlocks(groupedEntries));
+    } else {
+        for (const entry of entries.slice(0, 10)) {
+            blocks.push(buildDigestEntry(entry));
+            blocks.push({ type: 'divider' });
+        }
     }
 
-    if (entries.length > 10) {
+    if (groupedEntries.length > 8) {
+        blocks.push({
+            type: 'context',
+            elements: [
+                {
+                    type: 'mrkdwn',
+                    text: `Showing first 8 policy-type groups of ${slackEscape(groupedEntries.length)} total groups.`,
+                },
+            ],
+        });
+    } else if (entries.length > 10 && groupedEntries.length === 0) {
         blocks.push({
             type: 'context',
             elements: [
