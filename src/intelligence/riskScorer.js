@@ -168,7 +168,11 @@ function determineBusinessImpact(score) {
     return 'low';
 }
 
-function buildRecommendedAction(score, businessImpact, changeExplanations = [], primaryType = 'Unknown') {
+function buildRecommendedAction(score, businessImpact, changeExplanations = [], primaryType = 'Unknown', isFirstSeen = false) {
+    if (isFirstSeen) {
+        return `Baseline established for ${primaryType}. Monitor future changes from this point forward.`;
+    }
+
     const hasRestrictiveChange = changeExplanations.some(
         (item) => item.direction === 'more restrictive'
     );
@@ -188,7 +192,7 @@ function buildRecommendedAction(score, businessImpact, changeExplanations = [], 
     }
 
     if (score >= 40) {
-        return `Review during the next compliance cycle and confirm whether workflows or notices need updates.`;
+        return 'Review during the next compliance cycle and confirm whether workflows or notices need updates.';
     }
 
     if (businessImpact === 'low') {
@@ -208,7 +212,46 @@ export function scorePolicyRisk({
         matches: [],
     },
     changeExplanations = [],
+    isFirstSeen = false,
 } = {}) {
+    const classificationDrivers = [
+        policyClassification.primaryType !== 'Unknown'
+            ? `Primary classification: ${policyClassification.primaryType}`
+            : null,
+        ...(policyClassification.verticals || []).map((vertical) => `Vertical: ${vertical}`),
+    ];
+
+    if (isFirstSeen) {
+        const rawBaselineScore = clamp(
+            10 +
+            Math.round((policyClassification.confidence || 0) * 10) +
+            classificationWeight(
+                policyClassification.primaryType,
+                policyClassification.verticals || []
+            ) * 0.35,
+            5,
+            30
+        );
+
+        return {
+            riskScore: Math.round(rawBaselineScore),
+            severity: 'none',
+            businessImpact: 'low',
+            recommendedAction: buildRecommendedAction(
+                rawBaselineScore,
+                'low',
+                changeExplanations,
+                policyClassification.primaryType,
+                true
+            ),
+            drivers: unique([
+                'Initial baseline capture',
+                ...classificationDrivers,
+            ]),
+            baselineMode: true,
+        };
+    }
+
     const baseScore = severityToBaseScore(semanticDiff.severity);
     const classScore = classificationWeight(
         policyClassification.primaryType,
@@ -232,10 +275,8 @@ export function scorePolicyRisk({
     const drivers = unique([
         ...explanationPart.drivers,
         ...diffPart.drivers,
-        policyClassification.primaryType !== 'Unknown'
-            ? `Primary classification: ${policyClassification.primaryType}`
-            : null,
-        ...(policyClassification.verticals || []).map((vertical) => `Vertical: ${vertical}`),
+        ...classificationDrivers,
+        riskScore <= 10 ? 'No meaningful change detected' : null,
     ]);
 
     return {
@@ -246,8 +287,10 @@ export function scorePolicyRisk({
             riskScore,
             businessImpact,
             changeExplanations,
-            policyClassification.primaryType
+            policyClassification.primaryType,
+            false
         ),
         drivers,
+        baselineMode: false,
     };
 }

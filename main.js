@@ -50,7 +50,11 @@ function validateAgainstContract(output, OUTPUT_CONTRACT) {
 }
 
 // ========== SUMMARY GENERATOR ==========
-function generateSummary(semanticDiff, signals, url) {
+function generateSummary(semanticDiff, signals, url, isFirstSeen = false) {
+    if (isFirstSeen) {
+        return `Initial baseline established for policy at ${url}. Future runs will detect meaningful changes from this point forward.`;
+    }
+
     const totalChanges =
         (semanticDiff.added?.length || 0) +
         (semanticDiff.removed?.length || 0) +
@@ -82,7 +86,11 @@ function generateSummary(semanticDiff, signals, url) {
 }
 
 // ========== CONFIDENCE CALCULATOR ==========
-function calculateConfidence(semanticDiff, signals) {
+function calculateConfidence(semanticDiff, signals, isFirstSeen = false) {
+    if (isFirstSeen) {
+        return 0.35;
+    }
+
     let confidence = 0.5;
 
     if ((signals?.length || 0) > 0) {
@@ -119,36 +127,42 @@ async function generateOutput(
     OUTPUT_CONTRACT,
     policyClassification = null,
     changeExplanations = [],
-    riskAssessment = null
+    riskAssessment = null,
+    isFirstSeen = false
 ) {
     const output = {
         added: semanticDiff.added || [],
         removed: semanticDiff.removed || [],
         modified: semanticDiff.modified || [],
-        severity: semanticDiff.severity || 'none',
+        severity: isFirstSeen ? 'none' : (semanticDiff.severity || 'none'),
 
         summary: {
-            totalChanges:
-                (semanticDiff.added?.length || 0) +
-                (semanticDiff.removed?.length || 0) +
-                (semanticDiff.modified?.length || 0),
-            addedCount: semanticDiff.added?.length || 0,
-            removedCount: semanticDiff.removed?.length || 0,
-            modifiedCount: semanticDiff.modified?.length || 0,
+            totalChanges: isFirstSeen
+                ? 0
+                : (semanticDiff.added?.length || 0) +
+                  (semanticDiff.removed?.length || 0) +
+                  (semanticDiff.modified?.length || 0),
+            addedCount: isFirstSeen ? 0 : (semanticDiff.added?.length || 0),
+            removedCount: isFirstSeen ? 0 : (semanticDiff.removed?.length || 0),
+            modifiedCount: isFirstSeen ? 0 : (semanticDiff.modified?.length || 0),
         },
 
-        summaryText: generateSummary(semanticDiff, signals, url),
+        summaryText: generateSummary(semanticDiff, signals, url, isFirstSeen),
 
-        hasSemanticChange:
-            (semanticDiff.added?.length || 0) > 0 ||
-            (semanticDiff.removed?.length || 0) > 0 ||
-            (semanticDiff.modified?.length || 0) > 0,
+        hasSemanticChange: isFirstSeen
+            ? false
+            : (semanticDiff.added?.length || 0) > 0 ||
+              (semanticDiff.removed?.length || 0) > 0 ||
+              (semanticDiff.modified?.length || 0) > 0,
 
-        confidence: calculateConfidence(semanticDiff, signals),
+        confidence: calculateConfidence(semanticDiff, signals, isFirstSeen),
 
         timestamp: new Date().toISOString(),
         url,
-        changeExplanations: Array.isArray(changeExplanations) ? changeExplanations : [],
+        isFirstSeen,
+        changeExplanations: isFirstSeen
+            ? []
+            : (Array.isArray(changeExplanations) ? changeExplanations : []),
     };
 
     if (policyClassification) {
@@ -373,6 +387,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
             fetchStatus: 'failed',
             fetchError: fetchError.message,
             snapshotKey,
+            isFirstSeen: false,
             changeExplanations: [],
             policyClassification: {
                 primaryType: 'Unknown',
@@ -387,6 +402,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                 businessImpact: 'low',
                 recommendedAction: 'Unable to assess risk because the policy page could not be fetched.',
                 drivers: ['Fetch failed'],
+                baselineMode: false,
             },
         };
 
@@ -408,6 +424,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     };
 
     const previousRawText = (await Actor.getValue(rawTextKey)) || '';
+    const isFirstSeen = !previousRawText;
 
     // STEP 3 — Extract current semantic meaning
     const currentSemantic = extractSemanticMeaning(rawText);
@@ -416,24 +433,28 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     const policyClassification = classifyPolicyType(rawText, targetUrl);
 
     // STEP 3.7 — Explain clause-level changes
-    const changeExplanations = explainPolicyChanges(previousRawText, rawText);
+    const changeExplanations = isFirstSeen ? [] : explainPolicyChanges(previousRawText, rawText);
 
     // STEP 4 — Detect semantic change
-    const semanticDiff = detectSemanticChange(previousSemantic, currentSemantic);
+    const semanticDiff = isFirstSeen
+        ? { added: [], removed: [], modified: [], severity: 'none' }
+        : detectSemanticChange(previousSemantic, currentSemantic);
 
     // STEP 4.5 — Score policy risk
     const riskAssessment = scorePolicyRisk({
         semanticDiff,
         policyClassification,
         changeExplanations,
+        isFirstSeen,
     });
 
     // STEP 5 — Generate signals
-    const signals = generateSignals(semanticDiff) || [];
+    const signals = isFirstSeen ? [] : (generateSignals(semanticDiff) || []);
 
     log?.info('Semantic processing completed', {
         url: targetUrl,
         snapshotKey,
+        isFirstSeen,
         previousTopics: previousSemantic.topics?.length || 0,
         currentTopics: currentSemantic.topics?.length || 0,
         primaryPolicyType: policyClassification.primaryType,
@@ -451,7 +472,8 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         OUTPUT_CONTRACT,
         policyClassification,
         changeExplanations,
-        riskAssessment
+        riskAssessment,
+        isFirstSeen
     );
 
     output.snapshotKey = snapshotKey;
@@ -472,6 +494,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     log?.info('Processed URL successfully', {
         url: targetUrl,
         snapshotKey,
+        isFirstSeen,
         outputKey,
         riskScore: riskAssessment.riskScore,
     }) || console.log('Processed URL successfully', targetUrl);
@@ -548,6 +571,7 @@ Actor.main(async () => {
                         url: targetUrl,
                         fetchStatus: 'failed',
                         fetchError: err.message,
+                        isFirstSeen: false,
                         changeExplanations: [],
                         policyClassification: {
                             primaryType: 'Unknown',
@@ -562,6 +586,7 @@ Actor.main(async () => {
                             businessImpact: 'low',
                             recommendedAction: 'Unable to assess risk because processing failed.',
                             drivers: ['Unhandled processing error'],
+                            baselineMode: false,
                         },
                     };
 
@@ -579,6 +604,7 @@ Actor.main(async () => {
             processedUrls: urls.length,
             successfulUrls: results.filter((item) => item.fetchStatus !== 'failed').length,
             failedUrls: results.filter((item) => item.fetchStatus === 'failed').length,
+            firstSeenUrls: results.filter((item) => item.isFirstSeen).length,
             concurrencyUsed: concurrency,
             urls,
             timestamp: new Date().toISOString(),
