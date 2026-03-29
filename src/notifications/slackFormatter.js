@@ -56,6 +56,21 @@ function safeArray(values, max = 3) {
     return values.filter(Boolean).slice(0, max);
 }
 
+function priorityRank(priority = 'p4') {
+    switch (priority) {
+        case 'p0':
+            return 0;
+        case 'p1':
+            return 1;
+        case 'p2':
+            return 2;
+        case 'p3':
+            return 3;
+        default:
+            return 4;
+    }
+}
+
 function buildDriverList(drivers = [], max = 3) {
     const items = safeArray(drivers, max);
     if (!items.length) return '• No top drivers supplied';
@@ -202,6 +217,71 @@ function buildPolicyTypeGroupHeader(group = {}) {
     };
 }
 
+function flattenUrgentEntries(groupedEntries = []) {
+    return groupedEntries
+        .flatMap((group) =>
+            (group.entries || []).map((entry) => ({
+                ...entry,
+                groupPrimaryType: group.primaryType || entry.primaryType || 'Unknown',
+            }))
+        )
+        .sort((a, b) => {
+            const priorityCompare = priorityRank(a.priority) - priorityRank(b.priority);
+            if (priorityCompare !== 0) return priorityCompare;
+
+            const aReview = String(a.reviewWindow || '');
+            const bReview = String(b.reviewWindow || '');
+            if (aReview === 'immediate' && bReview !== 'immediate') return -1;
+            if (bReview === 'immediate' && aReview !== 'immediate') return 1;
+
+            const aTime = new Date(a.queuedAt || 0).getTime();
+            const bTime = new Date(b.queuedAt || 0).getTime();
+            return aTime - bTime;
+        });
+}
+
+function buildUrgentDigestSection(groupedEntries = []) {
+    const urgentEntries = flattenUrgentEntries(groupedEntries)
+        .filter((entry) => priorityRank(entry.priority) <= 1)
+        .slice(0, 3);
+
+    if (!urgentEntries.length) {
+        return [];
+    }
+
+    const blocks = [
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: '*Top Urgent Items*',
+            },
+        },
+    ];
+
+    for (const entry of urgentEntries) {
+        const icon = emojiForPriority(entry.priority || 'p4');
+        const text =
+            `${icon} *${truncate(slackEscape(entry.headline || 'Policy update'), 110)}*\n` +
+            `• Type: ${slackEscape(entry.groupPrimaryType || entry.primaryType || 'Unknown')} | ` +
+            `Priority: ${slackEscape((entry.priority || 'p4').toUpperCase())} | ` +
+            `Impact: ${slackEscape((entry.businessImpact || 'low').toUpperCase())}\n` +
+            `• Action: ${truncate(slackEscape(entry.recommendedAction || 'No action provided.'), 180)}\n` +
+            `• ${slackLink(entry.url, 'Open policy')}`;
+
+        blocks.push({
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: truncate(text, 2800),
+            },
+        });
+    }
+
+    blocks.push({ type: 'divider' });
+    return blocks;
+}
+
 function buildGroupedDigestBlocks(groupedEntries = []) {
     const blocks = [];
 
@@ -271,6 +351,7 @@ function buildDigestSlackPayload(digestPayload = {}) {
     ];
 
     if (groupedEntries.length > 0) {
+        blocks.push(...buildUrgentDigestSection(groupedEntries));
         blocks.push(...buildGroupedDigestBlocks(groupedEntries));
     } else {
         for (const entry of entries.slice(0, 10)) {
