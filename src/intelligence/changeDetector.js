@@ -4,32 +4,22 @@
  */
 
 /**
- * @typedef {Object} SemanticSnapshot
- * @property {string[]} topics
- * @property {string[]} obligations
- * @property {string[]} permissions
- * @property {string[]} restrictions
- * @property {string[]} entities
- */
-
-/**
- * @typedef {Object} SemanticChange
- * @property {string} type
- * @property {string} description
- * @property {string[]} affectedItems
- */
-
-/**
  * Main comparison function
  */
 export function detectSemanticChange(oldSemantics = {}, newSemantics = {}) {
+    const added = detectAdded(oldSemantics, newSemantics);
+    const removed = detectRemoved(oldSemantics, newSemantics);
+    const modified = detectModified(oldSemantics, newSemantics);
+    const severity = calculateSeverity(added, removed, modified);
+
     return {
-        added: detectAdded(oldSemantics, newSemantics),
-        removed: detectRemoved(oldSemantics, newSemantics),
-        modified: detectModified(oldSemantics, newSemantics),
-        severity: calculateSeverity(oldSemantics, newSemantics)
+        added,
+        removed,
+        modified,
+        severity,
     };
 }
+
 function detectAdded(oldS, newS) {
     const changes = [];
 
@@ -37,14 +27,14 @@ function detectAdded(oldS, newS) {
         const oldSet = new Set(oldS[key] || []);
         const newSet = new Set(newS[key] || []);
 
-        const added = [...newSet].filter(x => !oldSet.has(x));
+        const added = [...newSet].filter((x) => !oldSet.has(x));
 
         if (added.length) {
             changes.push({
-                type: "added",
+                type: 'added',
                 category: key,
                 affectedItems: added,
-                description: `New ${key} introduced`
+                description: `New ${key} introduced`,
             });
         }
     }
@@ -59,14 +49,14 @@ function detectRemoved(oldS, newS) {
         const oldSet = new Set(oldS[key] || []);
         const newSet = new Set(newS[key] || []);
 
-        const removed = [...oldSet].filter(x => !newSet.has(x));
+        const removed = [...oldSet].filter((x) => !newSet.has(x));
 
         if (removed.length) {
             changes.push({
-                type: "removed",
+                type: 'removed',
                 category: key,
                 affectedItems: removed,
-                description: `${key} removed`
+                description: `${key} removed`,
             });
         }
     }
@@ -77,57 +67,60 @@ function detectRemoved(oldS, newS) {
 function detectModified(oldS, newS) {
     const changes = [];
 
-    if (!oldS.summary || !newS.summary) return changes;
+    for (const key of semanticKeys()) {
+        const oldItems = oldS[key] || [];
+        const newItems = newS[key] || [];
 
-    if (oldS.summary !== newS.summary) {
-        changes.push({
-            type: "modified",
-            category: "summary",
-            affectedItems: [oldS.summary, newS.summary],
-            description: "Policy intent summary changed"
-        });
+        const sameLength = oldItems.length === newItems.length;
+        const sameValues =
+            sameLength &&
+            oldItems.every((item) => newItems.includes(item)) &&
+            newItems.every((item) => oldItems.includes(item));
+
+        if (!sameValues && oldItems.length > 0 && newItems.length > 0) {
+            const oldSet = new Set(oldItems);
+            const newSet = new Set(newItems);
+
+            const addedPortion = [...newSet].filter((x) => !oldSet.has(x));
+            const removedPortion = [...oldSet].filter((x) => !newSet.has(x));
+
+            if (addedPortion.length > 0 && removedPortion.length > 0) {
+                changes.push({
+                    type: 'modified',
+                    category: key,
+                    affectedItems: [...removedPortion, ...addedPortion],
+                    description: `${key} changed`,
+                });
+            }
+        }
     }
 
     return changes;
 }
 
-function calculateSeverity(oldS, newS) {
-    let score = 0;
-
-    const weights = {
+function calculateSeverity(added, removed, modified) {
+    const weightMap = {
         obligations: 5,
         restrictions: 4,
         permissions: 3,
         topics: 2,
-        entities: 1
     };
 
-    for (const key of semanticKeys()) {
-        const oldLen = (oldS[key] || []).length;
-        const newLen = (newS[key] || []).length;
+    let score = 0;
 
-        if (oldLen !== newLen) {
-            score += Math.abs(newLen - oldLen) * (weights[key] || 1);
-        }
+    for (const change of [...added, ...removed, ...modified]) {
+        const categoryWeight = weightMap[change.category] || 1;
+        const itemCount = change.affectedItems?.length || 1;
+        score += categoryWeight * itemCount;
     }
 
-    if (score >= 15) return "critical";
-    if (score >= 8) return "high";
-    if (score >= 4) return "medium";
-    return "low";
+    if (score === 0) return 'none';
+    if (score >= 15) return 'critical';
+    if (score >= 8) return 'high';
+    if (score >= 4) return 'medium';
+    return 'low';
 }
 
 function semanticKeys() {
-    return [
-        "topics",
-        "obligations",
-        "permissions",
-        "restrictions",
-        "entities"
-    ];
+    return ['topics', 'obligations', 'permissions', 'restrictions'];
 }
-
-//export function detectSemanticChange(previous, current) {
-    // existing implementation stays exactly the same
-//}
-
