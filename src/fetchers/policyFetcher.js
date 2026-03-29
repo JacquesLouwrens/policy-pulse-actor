@@ -3,7 +3,8 @@
 import { chromium } from 'playwright';
 
 /**
- * Fetch the visible text content of a policy page using a real browser.
+ * Fetch visible text content from a page using the Chrome browser
+ * available in the Apify Playwright Chrome Docker image.
  * @param {string} url
  * @returns {Promise<string>}
  */
@@ -23,6 +24,7 @@ export async function fetchPolicyText(url) {
 
     try {
         browser = await chromium.launch({
+            channel: 'chrome',
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox'],
         });
