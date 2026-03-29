@@ -14,6 +14,11 @@ function normalizePriority(priority) {
     return valid.includes(priority) ? priority : 'p4';
 }
 
+function normalizeBusinessImpact(impact) {
+    const valid = ['critical', 'high', 'medium', 'low'];
+    return valid.includes(impact) ? impact : 'low';
+}
+
 function priorityRank(priority) {
     switch (normalizePriority(priority)) {
         case 'p0':
@@ -79,6 +84,21 @@ function summarizeCounts(items = []) {
     return summary;
 }
 
+function summarizeBusinessImpact(items = []) {
+    const summary = {
+        critical: 0,
+        high: 0,
+        medium: 0,
+        low: 0,
+    };
+
+    for (const item of items) {
+        summary[normalizeBusinessImpact(item.businessImpact)] += 1;
+    }
+
+    return summary;
+}
+
 function groupEntriesByPolicyType(items = []) {
     const groupsMap = new Map();
 
@@ -107,6 +127,7 @@ function groupEntriesByPolicyType(items = []) {
             itemCount: sortedEntries.length,
             highestPriority: highestPriority(sortedEntries),
             summary: summarizeCounts(sortedEntries),
+            businessImpactSummary: summarizeBusinessImpact(sortedEntries),
             entries: sortedEntries,
         };
     });
@@ -127,6 +148,7 @@ function buildDigestPayload({
     maxItems,
 }) {
     const counts = summarizeCounts(items);
+    const businessImpactSummary = summarizeBusinessImpact(items);
     const highest = highestPriority(items);
     const groups = groupEntriesByPolicyType(items);
 
@@ -146,6 +168,7 @@ function buildDigestPayload({
             windowMinutes,
             maxItems,
         },
+        businessImpactSummary,
         groupedEntries: groups,
         entries: items.map((item) => ({
             url: item.url,
@@ -212,7 +235,7 @@ export async function queueDigestAlert({
             headline: normalizeString(alertPayload.headline),
             priority: normalizePriority(alertPayload.priority),
             severity: normalizeString(alertPayload.severity || 'none'),
-            businessImpact: normalizeString(alertPayload.businessImpact || 'low'),
+            businessImpact: normalizeBusinessImpact(alertPayload.businessImpact || 'low'),
             primaryType: normalizeString(alertPayload.primaryType || 'Unknown'),
             reviewWindow: normalizeString(alertPayload.reviewWindow || 'monitor'),
             requiresHumanReview: Boolean(alertPayload.requiresHumanReview),

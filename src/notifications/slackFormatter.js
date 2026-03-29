@@ -196,6 +196,7 @@ function buildDigestEntry(entry = {}) {
 function buildPolicyTypeGroupHeader(group = {}) {
     const icon = emojiForPriority(group.highestPriority || 'p4');
     const summary = group.summary || {};
+    const impact = group.businessImpactSummary || {};
 
     const text =
         `${icon} *${slackEscape(group.primaryType || 'Unknown')}*\n` +
@@ -206,7 +207,12 @@ function buildPolicyTypeGroupHeader(group = {}) {
         `${slackEscape(summary.p1 ?? 0)}/` +
         `${slackEscape(summary.p2 ?? 0)}/` +
         `${slackEscape(summary.p3 ?? 0)}/` +
-        `${slackEscape(summary.p4 ?? 0)}`;
+        `${slackEscape(summary.p4 ?? 0)}\n` +
+        `• Impact C/H/M/L: ` +
+        `${slackEscape(impact.critical ?? 0)}/` +
+        `${slackEscape(impact.high ?? 0)}/` +
+        `${slackEscape(impact.medium ?? 0)}/` +
+        `${slackEscape(impact.low ?? 0)}`;
 
     return {
         type: 'section',
@@ -282,6 +288,27 @@ function buildUrgentDigestSection(groupedEntries = []) {
     return blocks;
 }
 
+function buildBusinessImpactSummarySection(businessImpactSummary = {}) {
+    return [
+        {
+            type: 'section',
+            fields: [
+                {
+                    type: 'mrkdwn',
+                    text: `*Impact Critical / High*\n${slackEscape(businessImpactSummary.critical ?? 0)} / ${slackEscape(businessImpactSummary.high ?? 0)}`,
+                },
+                {
+                    type: 'mrkdwn',
+                    text: `*Impact Medium / Low*\n${slackEscape(businessImpactSummary.medium ?? 0)} / ${slackEscape(businessImpactSummary.low ?? 0)}`,
+                },
+            ],
+        },
+        {
+            type: 'divider',
+        },
+    ];
+}
+
 function buildGroupedDigestBlocks(groupedEntries = []) {
     const blocks = [];
 
@@ -300,6 +327,7 @@ function buildGroupedDigestBlocks(groupedEntries = []) {
 
 function buildDigestSlackPayload(digestPayload = {}) {
     const summary = digestPayload.summary || {};
+    const businessImpactSummary = digestPayload.businessImpactSummary || {};
     const groupedEntries = Array.isArray(digestPayload.groupedEntries)
         ? digestPayload.groupedEntries
         : [];
@@ -348,6 +376,7 @@ function buildDigestSlackPayload(digestPayload = {}) {
         {
             type: 'divider',
         },
+        ...buildBusinessImpactSummarySection(businessImpactSummary),
     ];
 
     if (groupedEntries.length > 0) {
