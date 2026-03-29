@@ -28,6 +28,7 @@ import {
     queueDigestAlert,
     recordDigestDelivery,
 } from './src/notifications/digestManager.js';
+import { formatSlackPayload } from './src/notifications/slackFormatter.js';
 
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
 function validateAgainstContract(output, OUTPUT_CONTRACT) {
@@ -399,7 +400,6 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     log?.info('Fetching target URL', { url: targetUrl, snapshotKey }) ||
         console.log('Fetching target URL', targetUrl, snapshotKey);
 
-    // STEP 1 — Fetch policy text
     let rawText = '';
     let fetchError = null;
 
@@ -535,7 +535,6 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         return blockedOutput;
     }
 
-    // STEP 2 — Load previous semantic snapshot and previous raw text for THIS URL only
     const previousSemantic = (await Actor.getValue(snapshotKey)) || {
         topics: [],
         obligations: [],
@@ -546,21 +545,14 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     const previousRawText = (await Actor.getValue(rawTextKey)) || '';
     const isFirstSeen = !previousRawText;
 
-    // STEP 3 — Extract current semantic meaning
     const currentSemantic = extractSemanticMeaning(rawText);
-
-    // STEP 3.5 — Classify policy type
     const policyClassification = classifyPolicyType(rawText, targetUrl);
-
-    // STEP 3.7 — Explain clause-level changes
     const changeExplanations = isFirstSeen ? [] : explainPolicyChanges(previousRawText, rawText);
 
-    // STEP 4 — Detect semantic change
     const semanticDiff = isFirstSeen
         ? { added: [], removed: [], modified: [], severity: 'none' }
         : detectSemanticChange(previousSemantic, currentSemantic);
 
-    // STEP 4.5 — Score policy risk
     const riskAssessment = scorePolicyRisk({
         semanticDiff,
         policyClassification,
@@ -568,7 +560,6 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         isFirstSeen,
     });
 
-    // STEP 5 — Generate signals
     const signals = isFirstSeen ? [] : (generateSignals(semanticDiff) || []);
 
     log?.info('Semantic processing completed', {
@@ -584,7 +575,6 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         businessImpact: riskAssessment.businessImpact,
     }) || console.log('Semantic processing completed');
 
-    // STEP 6 — Generate output
     const output = await generateOutput(
         semanticDiff,
         signals,
@@ -599,7 +589,6 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     output.snapshotKey = snapshotKey;
     output.fetchStatus = 'success';
 
-    // STEP 6.5 — Hybrid delivery: escalate, then immediate or digest
     const webhookUrl = process.env.WEBHOOK_URL || null;
     const alertCooldownMinutes = Number(process.env.ALERT_COOLDOWN_MINUTES || 60);
     const alertEscalationWindowHours = Number(process.env.ALERT_ESCALATION_WINDOW_HOURS || 24);
@@ -658,12 +647,14 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
             output.alertDedup = dedupDecision;
 
             if (dedupDecision.shouldSend) {
-                const webhookResult = await sendWebhookAlert(webhookUrl, finalAlertPayload);
+                const slackPayload = formatSlackPayload(finalAlertPayload);
+                const webhookResult = await sendWebhookAlert(webhookUrl, slackPayload);
 
                 output.webhookDelivery = {
                     attempted: true,
                     ...webhookResult,
                     deliveredAt: new Date().toISOString(),
+                    renderMode: 'slack_blocks',
                 };
 
                 output.digestDelivery = {
@@ -690,14 +681,14 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                     });
                 }
 
-                log?.info('Immediate webhook alert processed', {
+                log?.info('Immediate Slack alert processed', {
                     url: targetUrl,
                     priority: finalAlertPayload.priority,
                     requiresHumanReview: finalAlertPayload.requiresHumanReview,
                     webhookSuccess: webhookResult?.success || false,
                     dedupReason: dedupDecision.reason,
                     escalated: escalationDecision.escalated,
-                }) || console.log('Immediate webhook alert processed', targetUrl);
+                }) || console.log('Immediate Slack alert processed', targetUrl);
             } else {
                 output.webhookDelivery = {
                     attempted: false,
@@ -713,12 +704,12 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                     deliveredAt: null,
                 };
 
-                log?.info('Immediate webhook alert skipped by dedup layer', {
+                log?.info('Immediate Slack alert skipped by dedup layer', {
                     url: targetUrl,
                     priority: finalAlertPayload.priority,
                     dedupReason: dedupDecision.reason,
                     lastSentAt: dedupDecision.lastSentAt,
-                }) || console.log('Immediate webhook alert skipped by dedup layer', targetUrl);
+                }) || console.log('Immediate Slack alert skipped by dedup layer', targetUrl);
             }
         } else if (useDigestDelivery) {
             output.alertDedup = {
@@ -747,9 +738,10 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
             };
 
             if (digestDecision.shouldSendDigest) {
+                const slackDigestPayload = formatSlackPayload(digestDecision.digestPayload);
                 const digestWebhookResult = await sendWebhookAlert(
                     webhookUrl,
-                    digestDecision.digestPayload
+                    slackDigestPayload
                 );
 
                 output.digestDelivery = {
@@ -758,6 +750,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                     deliveredAt: new Date().toISOString(),
                     trigger: digestDecision.trigger,
                     itemCount: digestDecision.digestPayload?.itemCount || digestDecision.queueCount,
+                    renderMode: 'slack_blocks',
                 };
 
                 output.webhookDelivery = {
@@ -781,12 +774,12 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                     });
                 }
 
-                log?.info('Digest webhook processed', {
+                log?.info('Slack digest processed', {
                     url: targetUrl,
                     queueCount: digestDecision.queueCount,
                     trigger: digestDecision.trigger,
                     digestSuccess: digestWebhookResult?.success || false,
-                }) || console.log('Digest webhook processed', targetUrl);
+                }) || console.log('Slack digest processed', targetUrl);
             } else {
                 output.digestDelivery = {
                     attempted: false,
@@ -805,11 +798,11 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
                     deliveredAt: null,
                 };
 
-                log?.info('Alert queued for digest delivery', {
+                log?.info('Alert queued for Slack digest delivery', {
                     url: targetUrl,
                     queueCount: digestDecision.queueCount,
                     duplicateSkipped: digestDecision.duplicateSkipped,
-                }) || console.log('Alert queued for digest delivery', targetUrl);
+                }) || console.log('Alert queued for Slack digest delivery', targetUrl);
             }
         } else {
             output.alertDedup = {
@@ -880,7 +873,6 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         };
     }
 
-    // ========== STORAGE ==========
     await Actor.setValue(outputKey, output);
     await Actor.setValue(diffKey, semanticDiff);
     await Actor.setValue(currentSnapshotKey, currentSemantic);
@@ -889,7 +881,6 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     await Actor.setValue(rawCurrentKey, rawText);
     await Actor.setValue(rawTextKey, rawText);
 
-    // Dataset output
     await Actor.pushData(output);
 
     log?.info('Processed URL successfully', {
