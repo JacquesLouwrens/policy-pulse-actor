@@ -4,6 +4,23 @@ function truncate(text, max = 2800) {
     return `${text.slice(0, max - 3)}...`;
 }
 
+function slackEscape(text) {
+    if (text === null || text === undefined) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function slackLink(url, label = 'View policy') {
+    const safeUrl = String(url || '').trim();
+    const safeLabel = slackEscape(label || 'View policy');
+
+    if (!safeUrl) return safeLabel;
+
+    return `<${safeUrl}|${safeLabel}>`;
+}
+
 function emojiForPriority(priority = 'p4') {
     switch (priority) {
         case 'p0':
@@ -39,14 +56,22 @@ function safeArray(values, max = 3) {
     return values.filter(Boolean).slice(0, max);
 }
 
+function buildDriverList(drivers = [], max = 3) {
+    const items = safeArray(drivers, max);
+    if (!items.length) return '• No top drivers supplied';
+
+    return items
+        .map((item) => `• ${slackEscape(item)}`)
+        .join('\n');
+}
+
 function buildImmediateSlackPayload(alertPayload = {}) {
     const priority = alertPayload.priority || 'p4';
     const severity = alertPayload.severity || 'none';
     const icon = emojiForPriority(priority);
+    const severityIcon = emojiForSeverity(severity);
 
-    const driverText = safeArray(alertPayload.topDrivers, 3)
-        .map((item) => `• ${item}`)
-        .join('\n') || '• No top drivers supplied';
+    const driverText = buildDriverList(alertPayload.topDrivers, 3);
 
     const fallbackText =
         `${icon} ${alertPayload.headline || 'Policy alert'} ` +
@@ -68,23 +93,23 @@ function buildImmediateSlackPayload(alertPayload = {}) {
                 fields: [
                     {
                         type: 'mrkdwn',
-                        text: `*Priority*\n${priority.toUpperCase()}`,
+                        text: `*Priority*\n${slackEscape(priority.toUpperCase())}`,
                     },
                     {
                         type: 'mrkdwn',
-                        text: `*Severity*\n${severity.toUpperCase()}`,
+                        text: `*Severity*\n${severityIcon} ${slackEscape(severity.toUpperCase())}`,
                     },
                     {
                         type: 'mrkdwn',
-                        text: `*Risk Score*\n${alertPayload.riskScore ?? 0}`,
+                        text: `*Risk Score*\n${slackEscape(alertPayload.riskScore ?? 0)}`,
                     },
                     {
                         type: 'mrkdwn',
-                        text: `*Business Impact*\n${(alertPayload.businessImpact || 'low').toUpperCase()}`,
+                        text: `*Business Impact*\n${slackEscape((alertPayload.businessImpact || 'low').toUpperCase())}`,
                     },
                     {
                         type: 'mrkdwn',
-                        text: `*Review Window*\n${alertPayload.reviewWindow || 'monitor'}`,
+                        text: `*Review Window*\n${slackEscape(alertPayload.reviewWindow || 'monitor')}`,
                     },
                     {
                         type: 'mrkdwn',
@@ -96,7 +121,7 @@ function buildImmediateSlackPayload(alertPayload = {}) {
                 type: 'section',
                 text: {
                     type: 'mrkdwn',
-                    text: `*Summary*\n${truncate(alertPayload.message || 'No summary provided.', 1000)}`,
+                    text: `*Summary*\n${truncate(slackEscape(alertPayload.message || 'No summary provided.'), 1000)}`,
                 },
             },
             {
@@ -110,7 +135,7 @@ function buildImmediateSlackPayload(alertPayload = {}) {
                 type: 'section',
                 text: {
                     type: 'mrkdwn',
-                    text: `*Recommended Action*\n${truncate(alertPayload.recommendedAction || 'No action provided.', 1000)}`,
+                    text: `*Recommended Action*\n${truncate(slackEscape(alertPayload.recommendedAction || 'No action provided.'), 1000)}`,
                 },
             },
             {
@@ -118,7 +143,9 @@ function buildImmediateSlackPayload(alertPayload = {}) {
                 elements: [
                     {
                         type: 'mrkdwn',
-                        text: `*Policy Type:* ${alertPayload.primaryType || 'Unknown'} | *URL:* ${alertPayload.url || 'N/A'}`,
+                        text:
+                            `*Policy Type:* ${slackEscape(alertPayload.primaryType || 'Unknown')} | ` +
+                            `*Link:* ${slackLink(alertPayload.url, 'Open policy')}`,
                     },
                 ],
             },
@@ -128,16 +155,19 @@ function buildImmediateSlackPayload(alertPayload = {}) {
 
 function buildDigestEntry(entry = {}) {
     const icon = emojiForPriority(entry.priority || 'p4');
-    const drivers = safeArray(entry.topDrivers, 2).join(', ') || 'No top drivers';
+    const drivers = safeArray(entry.topDrivers, 2)
+        .map((item) => slackEscape(item))
+        .join(', ') || 'No top drivers';
+
     const line =
-        `${icon} *${truncate(entry.headline || 'Policy update', 120)}*\n` +
-        `• Priority: ${(entry.priority || 'p4').toUpperCase()} | ` +
-        `Severity: ${(entry.severity || 'none').toUpperCase()} | ` +
-        `Impact: ${(entry.businessImpact || 'low').toUpperCase()}\n` +
-        `• Type: ${entry.primaryType || 'Unknown'} | Review: ${entry.reviewWindow || 'monitor'}\n` +
+        `${icon} *${truncate(slackEscape(entry.headline || 'Policy update'), 120)}*\n` +
+        `• Priority: ${slackEscape((entry.priority || 'p4').toUpperCase())} | ` +
+        `Severity: ${slackEscape((entry.severity || 'none').toUpperCase())} | ` +
+        `Impact: ${slackEscape((entry.businessImpact || 'low').toUpperCase())}\n` +
+        `• Type: ${slackEscape(entry.primaryType || 'Unknown')} | Review: ${slackEscape(entry.reviewWindow || 'monitor')}\n` +
         `• Drivers: ${truncate(drivers, 180)}\n` +
-        `• Action: ${truncate(entry.recommendedAction || 'No action provided.', 220)}\n` +
-        `• URL: ${entry.url || 'N/A'}`;
+        `• Action: ${truncate(slackEscape(entry.recommendedAction || 'No action provided.'), 220)}\n` +
+        `• ${slackLink(entry.url, 'Open policy')}`;
 
     return {
         type: 'section',
@@ -168,27 +198,27 @@ function buildDigestSlackPayload(digestPayload = {}) {
             fields: [
                 {
                     type: 'mrkdwn',
-                    text: `*Highest Priority*\n${highest.toUpperCase()}`,
+                    text: `*Highest Priority*\n${slackEscape(highest.toUpperCase())}`,
                 },
                 {
                     type: 'mrkdwn',
-                    text: `*Items*\n${digestPayload.itemCount ?? entries.length}`,
+                    text: `*Items*\n${slackEscape(digestPayload.itemCount ?? entries.length)}`,
                 },
                 {
                     type: 'mrkdwn',
-                    text: `*Trigger*\n${digestPayload.trigger || 'scheduled'}`,
+                    text: `*Trigger*\n${slackEscape(digestPayload.trigger || 'scheduled')}`,
                 },
                 {
                     type: 'mrkdwn',
-                    text: `*Window*\n${summary.windowMinutes ?? 'N/A'} min`,
+                    text: `*Window*\n${slackEscape(summary.windowMinutes ?? 'N/A')} min`,
                 },
                 {
                     type: 'mrkdwn',
-                    text: `*P0 / P1*\n${summary.p0 ?? 0} / ${summary.p1 ?? 0}`,
+                    text: `*P0 / P1*\n${slackEscape(summary.p0 ?? 0)} / ${slackEscape(summary.p1 ?? 0)}`,
                 },
                 {
                     type: 'mrkdwn',
-                    text: `*P2 / P3 / P4*\n${summary.p2 ?? 0} / ${summary.p3 ?? 0} / ${summary.p4 ?? 0}`,
+                    text: `*P2 / P3 / P4*\n${slackEscape(summary.p2 ?? 0)} / ${slackEscape(summary.p3 ?? 0)} / ${slackEscape(summary.p4 ?? 0)}`,
                 },
             ],
         },
@@ -208,7 +238,7 @@ function buildDigestSlackPayload(digestPayload = {}) {
             elements: [
                 {
                     type: 'mrkdwn',
-                    text: `Showing first 10 of ${entries.length} digest items.`,
+                    text: `Showing first 10 of ${slackEscape(entries.length)} digest items.`,
                 },
             ],
         });
