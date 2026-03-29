@@ -346,14 +346,50 @@ function splitGroupsBySignal(groupedEntries = []) {
     return { expandedGroups, collapsedGroups };
 }
 
+function buildCollapsedReason(group = {}) {
+    const reasons = [];
+    const highestPriority = group.highestPriority || 'p4';
+    const highestBusinessImpact = group.highestBusinessImpact || 'low';
+    const topUrgentItem = group.topUrgentItem || null;
+
+    if (priorityRank(highestPriority) >= 3) {
+        reasons.push('low priority');
+    }
+
+    if (businessImpactRank(highestBusinessImpact) >= 2) {
+        reasons.push(highestBusinessImpact === 'medium' ? 'moderate impact' : 'low impact');
+    }
+
+    if (!topUrgentItem?.requiresHumanReview) {
+        reasons.push('no human review');
+    }
+
+    const urgentReviewWindow =
+        topUrgentItem?.reviewWindow === 'immediate' ||
+        topUrgentItem?.reviewWindow === '24h';
+
+    if (!urgentReviewWindow) {
+        reasons.push('no urgent review');
+    }
+
+    if (!reasons.length) {
+        return 'collapsed: low signal group';
+    }
+
+    return `collapsed: ${reasons.slice(0, 3).join(', ')}`;
+}
+
 function buildCollapsedGroupSummaryLine(group = {}) {
     const icon = emojiForPriority(group.highestPriority || 'p4');
     const impact = group.highestBusinessImpact || 'low';
+    const collapseReason = buildCollapsedReason(group);
+
     const text =
         `${icon} *${slackEscape(group.primaryType || 'Unknown')}* — ` +
         `${slackEscape(group.itemCount ?? 0)} alerts · ` +
         `highest ${slackEscape((group.highestPriority || 'p4').toUpperCase())} · ` +
-        `impact ${slackEscape(String(impact).toUpperCase())}`;
+        `impact ${slackEscape(String(impact).toUpperCase())}\n` +
+        `_${slackEscape(collapseReason)}_`;
 
     return {
         type: 'section',
