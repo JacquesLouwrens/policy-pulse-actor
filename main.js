@@ -10,6 +10,7 @@ import { extractSemanticMeaning } from './src/intelligence/semanticEngine.js';
 import { detectSemanticChange } from './src/intelligence/changeDetector.js';
 import { generateSignals } from './src/signals/signalGenerator.js';
 import { classifyPolicyType } from './src/intelligence/policyClassifier.js';
+import { explainPolicyChanges } from './src/intelligence/changeExplainer.js';
 
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
 function validateAgainstContract(output, OUTPUT_CONTRACT) {
@@ -110,7 +111,14 @@ function calculateConfidence(semanticDiff, signals) {
 }
 
 // ========== OUTPUT GENERATOR ==========
-async function generateOutput(semanticDiff, signals, url, OUTPUT_CONTRACT, policyClassification = null) {
+async function generateOutput(
+    semanticDiff,
+    signals,
+    url,
+    OUTPUT_CONTRACT,
+    policyClassification = null,
+    changeExplanations = []
+) {
     const output = {
         added: semanticDiff.added || [],
         removed: semanticDiff.removed || [],
@@ -138,6 +146,7 @@ async function generateOutput(semanticDiff, signals, url, OUTPUT_CONTRACT, polic
 
         timestamp: new Date().toISOString(),
         url,
+        changeExplanations: Array.isArray(changeExplanations) ? changeExplanations : [],
     };
 
     if (policyClassification) {
@@ -180,6 +189,14 @@ function buildSignalsKey(url) {
 
 function buildOutputKey(url) {
     return `OUTPUT-${buildHash(url)}`;
+}
+
+function buildRawTextKey(url) {
+    return `raw-last-${buildHash(url)}`;
+}
+
+function buildRawCurrentKey(url) {
+    return `raw-current-${buildHash(url)}`;
 }
 
 // ========== INPUT NORMALIZATION ==========
@@ -312,6 +329,8 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     const diffKey = buildDiffKey(targetUrl);
     const signalsKey = buildSignalsKey(targetUrl);
     const outputKey = buildOutputKey(targetUrl);
+    const rawTextKey = buildRawTextKey(targetUrl);
+    const rawCurrentKey = buildRawCurrentKey(targetUrl);
 
     log?.info('Fetching target URL', { url: targetUrl, snapshotKey }) ||
         console.log('Fetching target URL', targetUrl, snapshotKey);
@@ -348,6 +367,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
             fetchStatus: 'failed',
             fetchError: fetchError.message,
             snapshotKey,
+            changeExplanations: [],
             policyClassification: {
                 primaryType: 'Unknown',
                 secondaryTypes: [],
@@ -366,7 +386,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         return blockedOutput;
     }
 
-    // STEP 2 — Load previous semantic snapshot for THIS URL only
+    // STEP 2 — Load previous semantic snapshot and previous raw text for THIS URL only
     const previousSemantic = (await Actor.getValue(snapshotKey)) || {
         topics: [],
         obligations: [],
@@ -374,11 +394,16 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         restrictions: [],
     };
 
+    const previousRawText = (await Actor.getValue(rawTextKey)) || '';
+
     // STEP 3 — Extract current semantic meaning
     const currentSemantic = extractSemanticMeaning(rawText);
 
     // STEP 3.5 — Classify policy type
     const policyClassification = classifyPolicyType(rawText, targetUrl);
+
+    // STEP 3.7 — Explain clause-level changes
+    const changeExplanations = explainPolicyChanges(previousRawText, rawText);
 
     // STEP 4 — Detect semantic change
     const semanticDiff = detectSemanticChange(previousSemantic, currentSemantic);
@@ -393,6 +418,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         currentTopics: currentSemantic.topics?.length || 0,
         primaryPolicyType: policyClassification.primaryType,
         classificationConfidence: policyClassification.confidence,
+        changeExplanationCount: changeExplanations.length,
     }) || console.log('Semantic processing completed');
 
     // STEP 6 — Generate output
@@ -401,7 +427,8 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
         signals,
         targetUrl,
         OUTPUT_CONTRACT,
-        policyClassification
+        policyClassification,
+        changeExplanations
     );
 
     output.snapshotKey = snapshotKey;
@@ -413,6 +440,8 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
     await Actor.setValue(currentSnapshotKey, currentSemantic);
     await Actor.setValue(snapshotKey, currentSemantic);
     await Actor.setValue(signalsKey, signals);
+    await Actor.setValue(rawCurrentKey, rawText);
+    await Actor.setValue(rawTextKey, rawText);
 
     // Dataset output
     await Actor.pushData(output);
@@ -495,6 +524,7 @@ Actor.main(async () => {
                         url: targetUrl,
                         fetchStatus: 'failed',
                         fetchError: err.message,
+                        changeExplanations: [],
                         policyClassification: {
                             primaryType: 'Unknown',
                             secondaryTypes: [],
