@@ -161,6 +161,22 @@ function sortEntriesWithinGroup(entries = []) {
     });
 }
 
+function buildTopUrgentItem(entries = []) {
+    if (!entries.length) return null;
+
+    const top = entries[0];
+
+    return {
+        headline: normalizeString(top.headline),
+        priority: normalizePriority(top.priority),
+        businessImpact: normalizeBusinessImpact(top.businessImpact),
+        reviewWindow: normalizeReviewWindow(top.reviewWindow),
+        requiresHumanReview: Boolean(top.requiresHumanReview),
+        url: normalizeString(top.url),
+        recommendedAction: normalizeString(top.recommendedAction),
+    };
+}
+
 function groupEntriesByPolicyType(items = []) {
     const groupsMap = new Map();
 
@@ -182,6 +198,7 @@ function groupEntriesByPolicyType(items = []) {
             itemCount: sortedEntries.length,
             highestPriority: highestPriority(sortedEntries),
             highestBusinessImpact: highestBusinessImpact(sortedEntries),
+            topUrgentItem: buildTopUrgentItem(sortedEntries),
             summary: summarizeCounts(sortedEntries),
             businessImpactSummary: summarizeBusinessImpact(sortedEntries),
             entries: sortedEntries,

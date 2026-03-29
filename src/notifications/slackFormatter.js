@@ -193,13 +193,29 @@ function buildDigestEntry(entry = {}) {
     };
 }
 
+function buildUrgentBadgeLine(topUrgentItem = null) {
+    if (!topUrgentItem) {
+        return '• Top urgent: none';
+    }
+
+    const priorityIcon = emojiForPriority(topUrgentItem.priority || 'p4');
+    const review = slackEscape(topUrgentItem.reviewWindow || 'monitor');
+    const impact = slackEscape((topUrgentItem.businessImpact || 'low').toUpperCase());
+    const priority = slackEscape((topUrgentItem.priority || 'p4').toUpperCase());
+    const humanReview = topUrgentItem.requiresHumanReview ? ' · Human review' : '';
+
+    return `• Top urgent: ${priorityIcon} ${priority} · ${impact} · ${review}${humanReview}`;
+}
+
 function buildPolicyTypeGroupHeader(group = {}) {
     const icon = emojiForPriority(group.highestPriority || 'p4');
     const summary = group.summary || {};
     const impact = group.businessImpactSummary || {};
+    const urgentBadge = buildUrgentBadgeLine(group.topUrgentItem);
 
     const text =
         `${icon} *${slackEscape(group.primaryType || 'Unknown')}*\n` +
+        `${urgentBadge}\n` +
         `• Alerts: ${slackEscape(group.itemCount ?? 0)} | ` +
         `Highest: ${slackEscape((group.highestPriority || 'p4').toUpperCase())}\n` +
         `• P0/P1/P2/P3/P4: ` +
