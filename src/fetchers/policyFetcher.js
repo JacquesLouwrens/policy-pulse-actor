@@ -2,12 +2,6 @@
 
 import { chromium } from 'playwright';
 
-/**
- * Fetch visible text content from a page using the Chrome browser
- * available in the Apify Playwright Chrome Docker image.
- * @param {string} url
- * @returns {Promise<string>}
- */
 export async function fetchPolicyText(url) {
     if (!url || typeof url !== 'string') {
         throw new Error('fetchPolicyText requires a valid URL string.');
@@ -34,6 +28,10 @@ export async function fetchPolicyText(url) {
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             locale: 'en-US',
             ignoreHTTPSErrors: true,
+            extraHTTPHeaders: {
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Upgrade-Insecure-Requests': '1',
+            },
         });
 
         const page = await context.newPage();
@@ -43,11 +41,7 @@ export async function fetchPolicyText(url) {
             timeout: 45000,
         });
 
-        const status = response?.status();
-
-        if (status && status >= 400) {
-            throw new Error(`HTTP ${status} ${response.statusText() || ''}`.trim());
-        }
+        const status = response?.status() ?? 0;
 
         await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
 
@@ -57,12 +51,16 @@ export async function fetchPolicyText(url) {
             return document.documentElement?.outerHTML || '';
         });
 
+        await context.close();
+        await browser.close();
+
+        if (status >= 400) {
+            throw new Error(`HTTP ${status}`);
+        }
+
         if (!text || !text.trim()) {
             throw new Error('Received empty page content');
         }
-
-        await context.close();
-        await browser.close();
 
         return text;
     } catch (err) {

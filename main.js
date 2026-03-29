@@ -194,7 +194,47 @@ Actor.main(async () => {
             console.log('Fetching target URL', targetUrl);
 
         // STEP 1 — Fetch policy text
-        const rawText = await fetchPolicyText(targetUrl);
+        let rawText = '';
+        let fetchError = null;
+
+        try {
+            rawText = await fetchPolicyText(targetUrl);
+        } catch (err) {
+            fetchError = err;
+            log?.warning('Fetch failed', { url: targetUrl, error: err.message }) ||
+                console.warn('Fetch failed', targetUrl, err.message);
+        }
+
+        if (fetchError) {
+            const blockedOutput = {
+                added: [],
+                removed: [],
+                modified: [],
+                severity: 'none',
+                summary: {
+                    totalChanges: 0,
+                    addedCount: 0,
+                    removedCount: 0,
+                    modifiedCount: 0,
+                },
+                summaryText: `Unable to fetch policy content from ${targetUrl}: ${fetchError.message}`,
+                hasSemanticChange: false,
+                confidence: 0,
+                timestamp: new Date().toISOString(),
+                url: targetUrl,
+                fetchStatus: 'failed',
+                fetchError: fetchError.message,
+            };
+
+            await Actor.setValue('OUTPUT', blockedOutput);
+            await Actor.pushData(blockedOutput);
+
+            log?.info('Actor finished with fetch failure recorded') ||
+                console.log('Actor finished with fetch failure recorded');
+            console.log('Output:', JSON.stringify(blockedOutput, null, 2));
+
+            return;
+        }
 
         // STEP 2 — Load previous semantic snapshot
         const previousSemantic = (await Actor.getValue('semantic-last')) || {
