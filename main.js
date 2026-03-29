@@ -3,6 +3,7 @@
 // ========== ES MODULE IMPORTS ==========
 import { Actor } from 'apify';
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 
 import { fetchPolicyText } from './src/fetchers/policyFetcher.js';
 import { extractSemanticMeaning } from './src/intelligence/semanticEngine.js';
@@ -151,6 +152,184 @@ async function loadOutputContract() {
     return JSON.parse(raw);
 }
 
+// ========== URL KEY HELPERS ==========
+function buildHash(url) {
+    return createHash('sha256').update(url).digest('hex').slice(0, 24);
+}
+
+function buildSnapshotKey(url) {
+    return `semantic-last-${buildHash(url)}`;
+}
+
+function buildCurrentSnapshotKey(url) {
+    return `semantic-current-${buildHash(url)}`;
+}
+
+function buildDiffKey(url) {
+    return `semantic-diff-${buildHash(url)}`;
+}
+
+function buildSignalsKey(url) {
+    return `signals-${buildHash(url)}`;
+}
+
+function buildOutputKey(url) {
+    return `OUTPUT-${buildHash(url)}`;
+}
+
+// ========== INPUT NORMALIZATION ==========
+function normalizeInputToUrls(input) {
+    let parsedInput = input;
+
+    if (typeof parsedInput === 'string') {
+        const trimmed = parsedInput.trim();
+
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+            try {
+                parsedInput = JSON.parse(trimmed);
+            } catch {
+                parsedInput = { url: trimmed };
+            }
+        } else {
+            parsedInput = { url: trimmed };
+        }
+    }
+
+    const urls = [];
+
+    if (parsedInput?.url && typeof parsedInput.url === 'string') {
+        urls.push(parsedInput.url);
+    }
+
+    if (Array.isArray(parsedInput?.urls)) {
+        for (const value of parsedInput.urls) {
+            if (typeof value === 'string') {
+                urls.push(value);
+            }
+        }
+    }
+
+    const cleanedUrls = [...new Set(
+        urls
+            .map((url) => url.trim())
+            .filter(Boolean)
+    )];
+
+    if (cleanedUrls.length === 0) {
+        throw new Error('Input must include "url" (string) or "urls" (array of strings).');
+    }
+
+    return cleanedUrls;
+}
+
+// ========== SINGLE URL PROCESSOR ==========
+async function processUrl(targetUrl, OUTPUT_CONTRACT, log) {
+    const snapshotKey = buildSnapshotKey(targetUrl);
+    const currentSnapshotKey = buildCurrentSnapshotKey(targetUrl);
+    const diffKey = buildDiffKey(targetUrl);
+    const signalsKey = buildSignalsKey(targetUrl);
+    const outputKey = buildOutputKey(targetUrl);
+
+    log?.info('Fetching target URL', { url: targetUrl, snapshotKey }) ||
+        console.log('Fetching target URL', targetUrl, snapshotKey);
+
+    // STEP 1 — Fetch policy text
+    let rawText = '';
+    let fetchError = null;
+
+    try {
+        rawText = await fetchPolicyText(targetUrl);
+    } catch (err) {
+        fetchError = err;
+        log?.warning('Fetch failed', { url: targetUrl, error: err.message }) ||
+            console.warn('Fetch failed', targetUrl, err.message);
+    }
+
+    if (fetchError) {
+        const blockedOutput = {
+            added: [],
+            removed: [],
+            modified: [],
+            severity: 'none',
+            summary: {
+                totalChanges: 0,
+                addedCount: 0,
+                removedCount: 0,
+                modifiedCount: 0,
+            },
+            summaryText: `Unable to fetch policy content from ${targetUrl}: ${fetchError.message}`,
+            hasSemanticChange: false,
+            confidence: 0,
+            timestamp: new Date().toISOString(),
+            url: targetUrl,
+            fetchStatus: 'failed',
+            fetchError: fetchError.message,
+            snapshotKey,
+        };
+
+        await Actor.setValue(outputKey, blockedOutput);
+        await Actor.pushData(blockedOutput);
+
+        log?.info('Recorded fetch failure for URL', { url: targetUrl, snapshotKey }) ||
+            console.log('Recorded fetch failure for URL', targetUrl);
+
+        return blockedOutput;
+    }
+
+    // STEP 2 — Load previous semantic snapshot for THIS URL only
+    const previousSemantic = (await Actor.getValue(snapshotKey)) || {
+        topics: [],
+        obligations: [],
+        permissions: [],
+        restrictions: [],
+    };
+
+    // STEP 3 — Extract current semantic meaning
+    const currentSemantic = extractSemanticMeaning(rawText);
+
+    // STEP 4 — Detect semantic change
+    const semanticDiff = detectSemanticChange(previousSemantic, currentSemantic);
+
+    // STEP 5 — Generate signals
+    const signals = generateSignals(semanticDiff) || [];
+
+    log?.info('Semantic processing completed', {
+        url: targetUrl,
+        snapshotKey,
+        previousTopics: previousSemantic.topics?.length || 0,
+        currentTopics: currentSemantic.topics?.length || 0,
+    }) || console.log('Semantic processing completed');
+
+    // STEP 6 — Generate output
+    const output = await generateOutput(
+        semanticDiff,
+        signals,
+        targetUrl,
+        OUTPUT_CONTRACT
+    );
+
+    output.snapshotKey = snapshotKey;
+    output.fetchStatus = 'success';
+
+    // ========== STORAGE ==========
+    await Actor.setValue(outputKey, output);
+    await Actor.setValue(diffKey, semanticDiff);
+    await Actor.setValue(currentSnapshotKey, currentSemantic);
+    await Actor.setValue(snapshotKey, currentSemantic);
+    await Actor.setValue(signalsKey, signals);
+
+    // Dataset output
+    await Actor.pushData(output);
+
+    log?.info('Processed URL successfully', {
+        url: targetUrl,
+        snapshotKey,
+        outputKey,
+    }) || console.log('Processed URL successfully', targetUrl);
+
+    return output;
+}
+
 // ========== MAIN ACTOR ==========
 Actor.main(async () => {
     const log = Actor.log;
@@ -159,124 +338,57 @@ Actor.main(async () => {
         log?.info('Actor started') || console.log('Actor started');
 
         const OUTPUT_CONTRACT = await loadOutputContract();
-
         const input = await Actor.getInput();
+        const urls = normalizeInputToUrls(input);
 
-        let targetUrl = input?.url;
+        const results = [];
 
-        if (!targetUrl && typeof input === 'string') {
+        for (const targetUrl of urls) {
             try {
-                const parsed = JSON.parse(input);
-                targetUrl = parsed?.url;
-            } catch {
-                targetUrl = input;
+                const result = await processUrl(targetUrl, OUTPUT_CONTRACT, log);
+                results.push(result);
+            } catch (err) {
+                const failedItem = {
+                    added: [],
+                    removed: [],
+                    modified: [],
+                    severity: 'none',
+                    summary: {
+                        totalChanges: 0,
+                        addedCount: 0,
+                        removedCount: 0,
+                        modifiedCount: 0,
+                    },
+                    summaryText: `Unhandled processing error for ${targetUrl}: ${err.message}`,
+                    hasSemanticChange: false,
+                    confidence: 0,
+                    timestamp: new Date().toISOString(),
+                    url: targetUrl,
+                    fetchStatus: 'failed',
+                    fetchError: err.message,
+                };
+
+                await Actor.pushData(failedItem);
+                results.push(failedItem);
+
+                log?.error('URL processing failed', { url: targetUrl, error: err.message }) ||
+                    console.error('URL processing failed', targetUrl, err.message);
             }
         }
 
-        if (typeof targetUrl === 'string') {
-            const trimmed = targetUrl.trim();
-
-            if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-                try {
-                    const parsed = JSON.parse(trimmed);
-                    targetUrl = parsed?.url ?? trimmed;
-                } catch {
-                    targetUrl = trimmed;
-                }
-            }
-        }
-
-        if (!targetUrl || typeof targetUrl !== 'string') {
-            throw new Error('Input must include a valid "url" field.');
-        }
-
-        log?.info('Fetching target URL', { url: targetUrl }) ||
-            console.log('Fetching target URL', targetUrl);
-
-        // STEP 1 — Fetch policy text
-        let rawText = '';
-        let fetchError = null;
-
-        try {
-            rawText = await fetchPolicyText(targetUrl);
-        } catch (err) {
-            fetchError = err;
-            log?.warning('Fetch failed', { url: targetUrl, error: err.message }) ||
-                console.warn('Fetch failed', targetUrl, err.message);
-        }
-
-        if (fetchError) {
-            const blockedOutput = {
-                added: [],
-                removed: [],
-                modified: [],
-                severity: 'none',
-                summary: {
-                    totalChanges: 0,
-                    addedCount: 0,
-                    removedCount: 0,
-                    modifiedCount: 0,
-                },
-                summaryText: `Unable to fetch policy content from ${targetUrl}: ${fetchError.message}`,
-                hasSemanticChange: false,
-                confidence: 0,
-                timestamp: new Date().toISOString(),
-                url: targetUrl,
-                fetchStatus: 'failed',
-                fetchError: fetchError.message,
-            };
-
-            await Actor.setValue('OUTPUT', blockedOutput);
-            await Actor.pushData(blockedOutput);
-
-            log?.info('Actor finished with fetch failure recorded') ||
-                console.log('Actor finished with fetch failure recorded');
-            console.log('Output:', JSON.stringify(blockedOutput, null, 2));
-
-            return;
-        }
-
-        // STEP 2 — Load previous semantic snapshot
-        const previousSemantic = (await Actor.getValue('semantic-last')) || {
-            topics: [],
-            obligations: [],
-            permissions: [],
-            restrictions: [],
+        const runSummary = {
+            processedUrls: urls.length,
+            successfulUrls: results.filter((item) => item.fetchStatus !== 'failed').length,
+            failedUrls: results.filter((item) => item.fetchStatus === 'failed').length,
+            urls,
+            timestamp: new Date().toISOString(),
         };
 
-        // STEP 3 — Extract current semantic meaning
-        const currentSemantic = extractSemanticMeaning(rawText);
+        await Actor.setValue('OUTPUT', runSummary);
 
-        // STEP 4 — Detect semantic change
-        const semanticDiff = detectSemanticChange(previousSemantic, currentSemantic);
-
-        // STEP 5 — Generate signals
-        const signals = generateSignals(semanticDiff) || [];
-
-        log?.info('Semantic processing completed') ||
-            console.log('Semantic processing completed');
-
-        // STEP 6 — Generate output
-        const output = await generateOutput(
-            semanticDiff,
-            signals,
-            targetUrl,
-            OUTPUT_CONTRACT
-        );
-
-        // ========== STORAGE ==========
-        await Actor.setValue('OUTPUT', output);
-        await Actor.setValue('semantic-diff', semanticDiff);
-        await Actor.setValue('semantic-current', currentSemantic);
-        await Actor.setValue('semantic-last', currentSemantic);
-        await Actor.setValue('signals', signals);
-
-        // Dataset output
-        await Actor.pushData(output);
-
-        log?.info('Actor finished successfully') ||
-            console.log('Actor finished successfully');
-        console.log('Output:', JSON.stringify(output, null, 2));
+        log?.info('Actor finished successfully', runSummary) ||
+            console.log('Actor finished successfully', runSummary);
+        console.log('Run summary:', JSON.stringify(runSummary, null, 2));
     } catch (error) {
         console.error('Actor failed:', error?.message || error);
         throw error;
