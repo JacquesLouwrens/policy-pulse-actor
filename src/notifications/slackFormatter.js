@@ -564,6 +564,32 @@ function buildDigestFooterRollup({
     ];
 }
 
+function buildDigestConfidenceFooter() {
+    return [
+        {
+            type: 'divider',
+        },
+        {
+            type: 'section',
+            text: {
+                type: 'mrkdwn',
+                text: '*Digest Confidence*',
+            },
+        },
+        {
+            type: 'context',
+            elements: [
+                {
+                    type: 'mrkdwn',
+                    text:
+                        'High-signal items are expanded first; lower-signal items may be condensed for readability. ' +
+                        'Use the full record or dashboard for complete detail.',
+                },
+            ],
+        },
+    ];
+}
+
 function buildDigestSlackPayload(digestPayload = {}) {
     const summary = digestPayload.summary || {};
     const businessImpactSummary = digestPayload.businessImpactSummary || {};
@@ -633,6 +659,7 @@ function buildDigestSlackPayload(digestPayload = {}) {
                 hiddenEntriesNotShown: expandedRender.hiddenEntriesNotShown,
             })
         );
+        blocks.push(...buildDigestConfidenceFooter());
     } else {
         for (const entry of entries.slice(0, 10)) {
             blocks.push(buildDigestEntry(entry));
