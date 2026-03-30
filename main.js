@@ -37,6 +37,11 @@ import {
     routeImmediateAlert,
     routeDigestAlert,
 } from './src/notifications/channelRouter.js';
+import {
+    routeImmediateAlert,
+    routeDigestAlert,
+} from './src/notifications/channelRouter.js';
+
 
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
 function validateAgainstContract(output, OUTPUT_CONTRACT) {
@@ -406,8 +411,36 @@ function extractDeliveryContext(input) {
                 : null,
     };
 }
+// ========== CHANGE TYPE HELPER ==========
+
+function outputChangeTypeFromDiff(semanticDiff = {}) {
+    const addedCount = semanticDiff?.added?.length || 0;
+    const removedCount = semanticDiff?.removed?.length || 0;
+    const modifiedCount = semanticDiff?.modified?.length || 0;
+
+    const totalChanges = addedCount + removedCount + modifiedCount;
+
+    if (totalChanges === 0) {
+        return 'no_change';
+    }
+
+    if (addedCount > 0 && removedCount === 0 && modifiedCount === 0) {
+        return 'added_only';
+    }
+
+    if (removedCount > 0 && addedCount === 0 && modifiedCount === 0) {
+        return 'removed_only';
+    }
+
+    if (modifiedCount > 0 && addedCount === 0 && removedCount === 0) {
+        return 'modified_only';
+    }
+
+    return 'mixed_change';
+}
 
 // ========== SINGLE URL PROCESSOR ==========
+
 async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {}) {
     const snapshotKey = buildSnapshotKey(targetUrl);
     const currentSnapshotKey = buildCurrentSnapshotKey(targetUrl);
@@ -573,18 +606,30 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {})
     const policyClassification = classifyPolicyType(rawText, targetUrl);
     const changeExplanations = isFirstSeen ? [] : explainPolicyChanges(previousRawText, rawText);
 
-    const semanticDiff = isFirstSeen
-        ? { added: [], removed: [], modified: [], severity: 'none' }
-        : detectSemanticChange(previousSemantic, currentSemantic);
-
     const riskAssessment = scorePolicyRisk({
-        semanticDiff,
-        policyClassification,
-        changeExplanations,
-        isFirstSeen,
-    });
+    semanticDiff,
+    policyClassification,
+    changeExplanations,
+    isFirstSeen,
+});
+// ========== SINGLE URL PROCESSOR ==========
 
-    const signals = isFirstSeen ? [] : (generateSignals(semanticDiff) || []);
+const signalDecision = isFirstSeen
+    ? { notify: false, reason: 'initial_baseline_established' }
+    : getSignalDecision(
+        {
+            changeType: outputChangeTypeFromDiff(semanticDiff),
+            classification: policyClassification?.primaryType || null,
+            newConcepts: semanticDiff?.added || [],
+        },
+        riskAssessment,
+        {
+            lastClassification: previousSemantic?.lastClassification || null,
+            lastChangeType: previousSemantic?.lastChangeType || null,
+        }
+    );
+
+const signals = isFirstSeen ? [] : (generateSignals(semanticDiff) || []);
 
     log?.info('Semantic processing completed', {
         url: targetUrl,
@@ -610,8 +655,9 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {})
         isFirstSeen
     );
 
-    output.snapshotKey = snapshotKey;
-    output.fetchStatus = 'success';
+output.snapshotKey = snapshotKey;
+output.fetchStatus = 'success';
+output.signalDecision = signalDecision;
 
     const resolvedDelivery = await resolveDeliveryPreferences(deliveryContext);
     output.deliveryPreferences = {
@@ -666,7 +712,47 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {})
             alertPayload: finalAlertPayload,
             preferences: resolvedDelivery.preferences,
         });
+if (!signalDecision.notify) {
+    output.deliveryDecision = {
+        route: 'skip',
+        reason: `signal_filter:${signalDecision.reason}`,
+    };
 
+    output.alertDedup = {
+        shouldSend: false,
+        reason: `Signal filter suppressed: ${signalDecision.reason}`,
+        cooldownMinutes: alertCooldownMinutes,
+    };
+
+    output.digestRouting = {
+        mode: 'none',
+        reason: signalDecision.reason,
+    };
+
+    output.digestDelivery = {
+        attempted: false,
+        skipped: true,
+        reason: signalDecision.reason,
+        deliveredAt: null,
+    };
+
+    output.webhookDelivery = {
+        attempted: false,
+        skipped: true,
+        reason: signalDecision.reason,
+        deliveredAt: null,
+    };
+
+    log?.info('Suppressed by signal filter', {
+        url: targetUrl,
+        reason: signalDecision.reason,
+        riskScore: riskAssessment?.riskScore,
+    }) || console.log('Suppressed by signal filter', targetUrl);
+
+} else {
+    output.deliveryDecision = preferenceDecision;
+
+    // existing immediate/digest logic stays inside here
         output.deliveryDecision = preferenceDecision;
 
         const useImmediateDelivery =
@@ -900,6 +986,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {})
                 deliveredAt: null,
             };
         }
+    }
     } else {
         output.alertEscalation = {
             escalated: false,
@@ -907,8 +994,9 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {})
                 ? 'No webhook URL provided'
                 : 'No alert payload available',
             escalationWindowHours: alertEscalationWindowHours,
+    
         };
-
+    
         output.deliveryDecision = {
             route: 'skip',
             reason: !webhookUrl
@@ -1179,4 +1267,5 @@ Actor.main(async () => {
         throw error;
     }
 });
+
 
