@@ -1,90 +1,58 @@
-import { Actor } from 'apify';
-import { createHash } from 'node:crypto';
-
-export const DEFAULT_DELIVERY_PREFERENCES = {
-    channels: ['slack'],
-    emailTo: null,
-    minPriorityForImmediate: 'p1',
-    minPriorityForDigest: 'p3',
-    allowImmediate: true,
-    allowDigest: true,
-    quietHours: {
-        enabled: false,
-        startHour: 22,
-        endHour: 6,
-        timezone: 'UTC',
-    },
-    deliverDuringQuietHours: {
-        p0: true,
-        p1: true,
-        p2: false,
-        p3: false,
-        p4: false,
-    },
-    allowedPolicyTypes: [],
-    blockedPolicyTypes: [],
-    allowedBusinessImpacts: [],
-    blockedDomains: [],
-};
-
-function normalizeString(value) {
-    return typeof value === 'string' ? value.trim() : '';
+function isPlainObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function normalizeArray(values) {
-    if (!Array.isArray(values)) return [];
-    return values
-        .map((item) => normalizeString(item))
-        .filter(Boolean);
-}
+function deepMerge(base, override) {
+    if (!isPlainObject(base)) return override;
+    if (!isPlainObject(override)) return override ?? base;
 
-function normalizePriority(priority) {
-    const valid = ['p0', 'p1', 'p2', 'p3', 'p4'];
-    return valid.includes(priority) ? priority : 'p4';
-}
+    const result = { ...base };
 
-function priorityRank(priority) {
-    switch (normalizePriority(priority)) {
-        case 'p0':
-            return 0;
-        case 'p1':
-            return 1;
-        case 'p2':
-            return 2;
-        case 'p3':
-            return 3;
-        default:
-            return 4;
+    for (const [key, value] of Object.entries(override)) {
+        if (value === undefined) continue;
+
+        if (isPlainObject(value) && isPlainObject(result[key])) {
+            result[key] = deepMerge(result[key], value);
+        } else {
+            result[key] = value;
+        }
     }
+
+    return result;
 }
 
-function buildHash(input) {
-    return createHash('sha256').update(input).digest('hex').slice(0, 24);
-}
-
-function buildTenantKey(tenantId) {
-    return `delivery-prefs-tenant-${buildHash(tenantId)}`;
-}
-
-function buildUserKey(userId) {
-    return `delivery-prefs-user-${buildHash(userId)}`;
-}
-
-function mergePreferences(base, override) {
+export function getDefaultDeliveryPreferences() {
     return {
-        ...base,
-        ...override,
-        channels: Array.isArray(override?.channels)
-            ? [...new Set(
-                override.channels
-                    .map((item) => normalizeString(item).toLowerCase())
-                    .filter(Boolean)
-              )]
-            : base.channels,
-        emailTo: normalizeString(override?.emailTo ?? base.emailTo) || null,
-        quietHours: {
-            ...base.quietHours,
-            ...(override?.quietHours || {}),
+        mode: 'log',
+        channels: {
+            slack: {
+                enabled: true,
+                channel: null,
+            },
+            email: {
+                enabled: false,
+                to: [],
+                subjectPrefix: '[Policy Pulse]',
+            },
         },
-        deliverDuringQuietHours: {
-           
+        digest: {
+            maxEntriesPerGroup: 5,
+            includeOverflowSummary: true,
+            includeConfidenceFooter: true,
+        },
+    };
+}
+
+export function normalizeDeliveryPreferences(preferences = {}) {
+    const defaults = getDefaultDeliveryPreferences();
+    return deepMerge(defaults, preferences);
+}
+
+export function mergePreferences(...preferenceLayers) {
+    const defaults = getDefaultDeliveryPreferences();
+
+    return preferenceLayers.reduce((merged, layer) => {
+        if (!layer || !isPlainObject(layer)) return merged;
+        return deepMerge(merged, layer);
+    }, defaults);
+}
