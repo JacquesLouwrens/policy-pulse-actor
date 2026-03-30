@@ -56,3 +56,38 @@ export function mergePreferences(...preferenceLayers) {
         return deepMerge(merged, layer);
     }, defaults);
 }
+
+export function evaluateDeliveryPreferences(preferences = {}) {
+    const resolved = normalizeDeliveryPreferences(preferences);
+
+    const slackEnabled =
+        resolved?.channels?.slack?.enabled === true &&
+        !!resolved?.channels?.slack?.channel;
+
+    const emailEnabled =
+        resolved?.channels?.email?.enabled === true &&
+        Array.isArray(resolved?.channels?.email?.to) &&
+        resolved.channels.email.to.length > 0;
+
+    let mode = resolved.mode;
+
+    if (mode === 'auto') {
+        if (slackEnabled || emailEnabled) {
+            mode = 'deliver';
+        } else {
+            mode = 'log';
+        }
+    }
+
+    return {
+        ...resolved,
+        resolvedMode: mode,
+        capabilities: {
+            slack: slackEnabled,
+            email: emailEnabled,
+        },
+        shouldLog: mode === 'log' || (!slackEnabled && !emailEnabled),
+        shouldDeliverSlack: mode === 'deliver' && slackEnabled,
+        shouldDeliverEmail: mode === 'deliver' && emailEnabled,
+    };
+}
