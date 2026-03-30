@@ -33,6 +33,10 @@ import {
     resolveDeliveryPreferences,
     evaluateDeliveryPreferences,
 } from './src/delivery/deliveryPreferences.js';
+import {
+    routeImmediateAlert,
+    routeDigestAlert,
+} from './src/notifications/channelRouter.js';
 
 // ========== OUTPUT VALIDATION FUNCTIONS ==========
 function validateAgainstContract(output, OUTPUT_CONTRACT) {
@@ -688,14 +692,25 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {})
             output.alertDedup = dedupDecision;
 
             if (dedupDecision.shouldSend) {
-                const slackPayload = formatSlackPayload(finalAlertPayload);
-                const webhookResult = await sendWebhookAlert(webhookUrl, slackPayload);
+                                const channelRouteResult = await routeImmediateAlert({
+                    alertPayload: finalAlertPayload,
+                    preferences: resolvedDelivery.preferences,
+                });
+
+                output.channelDelivery = channelRouteResult;
+
+                const primaryChannelResult =
+                    channelRouteResult.results.slack ||
+                    channelRouteResult.results.email ||
+                    { success: false, skipped: true, reason: 'No channel result available' };
 
                 output.webhookDelivery = {
-                    attempted: true,
-                    ...webhookResult,
+                    attempted: Boolean(channelRouteResult.results.slack),
+                    ...(channelRouteResult.results.slack || {
+                        skipped: true,
+                        reason: 'Slack channel not used',
+                    }),
                     deliveredAt: new Date().toISOString(),
-                    renderMode: 'slack_blocks',
                 };
 
                 output.digestDelivery = {
@@ -705,12 +720,12 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {})
                     deliveredAt: null,
                 };
 
-                if (webhookResult?.success) {
+                if (primaryChannelResult?.success) {
                     await recordEscalationEvent({
                         url: targetUrl,
                         alertPayload: finalAlertPayload,
                         escalationDecision,
-                        webhookResult,
+                        webhookResult: primaryChannelResult,
                     });
 
                     await recordSentAlert({
@@ -718,9 +733,19 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {})
                         alertPayload: finalAlertPayload,
                         fingerprint: dedupDecision.fingerprint,
                         cooldownMinutes: alertCooldownMinutes,
-                        webhookResult,
+                        webhookResult: primaryChannelResult,
                     });
                 }
+
+                log?.info('Immediate multi-channel alert processed', {
+                    url: targetUrl,
+                    priority: finalAlertPayload.priority,
+                    requiresHumanReview: finalAlertPayload.requiresHumanReview,
+                    channels: channelRouteResult.channels,
+                    dedupReason: dedupDecision.reason,
+                    escalated: escalationDecision.escalated,
+                    preferenceReason: preferenceDecision.reason,
+                }) || console.log('Immediate multi-channel alert processed', targetUrl);
 
                 log?.info('Immediate Slack alert processed', {
                     url: targetUrl,
@@ -1154,3 +1179,4 @@ Actor.main(async () => {
         throw error;
     }
 });
+
