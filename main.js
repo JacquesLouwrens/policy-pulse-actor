@@ -628,7 +628,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {})
     const digestMaxItems = Number(process.env.DIGEST_MAX_ITEMS || 5);
     const digestChannel = process.env.DIGEST_CHANNEL || 'policy-digests';
 
-    if (webhookUrl && output?.alertPayload) {
+    if (output?.alertPayload) {
         const escalationDecision = await evaluateAlertEscalation({
             url: targetUrl,
             alertPayload: output.alertPayload,
@@ -751,7 +751,7 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {})
                     url: targetUrl,
                     priority: finalAlertPayload.priority,
                     requiresHumanReview: finalAlertPayload.requiresHumanReview,
-                    webhookSuccess: webhookResult?.success || false,
+                    webhookSuccess: primaryChannelResult?.success || false,
                     dedupReason: dedupDecision.reason,
                     escalated: escalationDecision.escalated,
                     preferenceReason: preferenceDecision.reason,

@@ -23,7 +23,7 @@ function deepMerge(base, override) {
 
 export function getDefaultDeliveryPreferences() {
     return {
-        mode: 'log',
+        mode: 'log', // log | immediate | digest | auto | skip
         channels: {
             slack: {
                 enabled: true,
@@ -36,6 +36,7 @@ export function getDefaultDeliveryPreferences() {
             },
         },
         digest: {
+            enabled: true,
             maxEntriesPerGroup: 5,
             includeOverflowSummary: true,
             includeConfidenceFooter: true,
@@ -44,50 +45,116 @@ export function getDefaultDeliveryPreferences() {
 }
 
 export function normalizeDeliveryPreferences(preferences = {}) {
-    const defaults = getDefaultDeliveryPreferences();
-    return deepMerge(defaults, preferences);
+    return deepMerge(getDefaultDeliveryPreferences(), preferences);
 }
 
 export function mergePreferences(...preferenceLayers) {
-    const defaults = getDefaultDeliveryPreferences();
-
     return preferenceLayers.reduce((merged, layer) => {
         if (!layer || !isPlainObject(layer)) return merged;
         return deepMerge(merged, layer);
-    }, defaults);
+    }, getDefaultDeliveryPreferences());
 }
 
-export function evaluateDeliveryPreferences(preferences = {}) {
-    const resolved = normalizeDeliveryPreferences(preferences);
+export async function resolveDeliveryPreferences(deliveryContext = {}) {
+    const defaults = getDefaultDeliveryPreferences();
 
-    const slackEnabled =
-        resolved?.channels?.slack?.enabled === true &&
-        !!resolved?.channels?.slack?.channel;
+    const inlinePreferences = isPlainObject(deliveryContext.inlinePreferences)
+        ? deliveryContext.inlinePreferences
+        : {};
 
-    const emailEnabled =
-        resolved?.channels?.email?.enabled === true &&
-        Array.isArray(resolved?.channels?.email?.to) &&
-        resolved.channels.email.to.length > 0;
+    const preferences = mergePreferences(defaults, inlinePreferences);
 
-    let mode = resolved.mode;
+    return {
+        tenantId: deliveryContext?.tenantId || null,
+        userId: deliveryContext?.userId || null,
+        sources: {
+            defaults: true,
+            tenant: false,
+            user: false,
+            inline: Object.keys(inlinePreferences).length > 0,
+        },
+        preferences,
+    };
+}
 
-    if (mode === 'auto') {
-        if (slackEnabled || emailEnabled) {
-            mode = 'deliver';
-        } else {
-            mode = 'log';
-        }
+export function evaluateDeliveryPreferences({ url, alertPayload, preferences } = {}) {
+    const effective = normalizeDeliveryPreferences(preferences || {});
+
+    const severity = alertPayload?.severity || 'none';
+    const riskScore = Number(alertPayload?.riskScore || 0);
+    const requiresHumanReview = Boolean(alertPayload?.requiresHumanReview);
+
+    if (effective.mode === 'skip') {
+        return {
+            route: 'skip',
+            reason: 'Delivery mode explicitly set to skip',
+            url,
+            severity,
+            riskScore,
+        };
+    }
+
+    if (effective.mode === 'log') {
+        return {
+            route: 'skip',
+            reason: 'Log-only mode selected',
+            url,
+            severity,
+            riskScore,
+        };
+    }
+
+    if (effective.mode === 'immediate') {
+        return {
+            route: 'immediate',
+            reason: 'Delivery mode explicitly set to immediate',
+            url,
+            severity,
+            riskScore,
+        };
+    }
+
+    if (effective.mode === 'digest') {
+        return {
+            route: 'digest',
+            reason: 'Delivery mode explicitly set to digest',
+            url,
+            severity,
+            riskScore,
+        };
+    }
+
+    if (effective.mode !== 'auto') {
+        return {
+            route: 'skip',
+            reason: `Unsupported delivery mode "${effective.mode}"`,
+            url,
+            severity,
+            riskScore,
+        };
+    }
+
+    // AUTO MODE LOGIC
+    if (
+        severity === 'critical' ||
+        severity === 'high' ||
+        riskScore >= 70 ||
+        requiresHumanReview
+    ) {
+        return {
+            route: 'immediate',
+            reason: 'Auto mode selected immediate delivery due to risk/severity',
+            url,
+            severity,
+            riskScore,
+        };
     }
 
     return {
-        ...resolved,
-        resolvedMode: mode,
-        capabilities: {
-            slack: slackEnabled,
-            email: emailEnabled,
-        },
-        shouldLog: mode === 'log' || (!slackEnabled && !emailEnabled),
-        shouldDeliverSlack: mode === 'deliver' && slackEnabled,
-        shouldDeliverEmail: mode === 'deliver' && emailEnabled,
+        route: 'digest',
+        reason: 'Auto mode selected digest delivery for lower-priority alert',
+        url,
+        severity,
+        riskScore,
     };
 }
