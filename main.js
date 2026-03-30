@@ -1,5 +1,3 @@
-// main.js
-
 // ========== ES MODULE IMPORTS ==========
 import { Actor } from 'apify';
 import fs from 'node:fs/promises';
@@ -15,28 +13,14 @@ import { scorePolicyRisk } from './src/intelligence/riskScorer.js';
 import { formatDashboardView } from './src/presentation/dashboardFormatter.js';
 import { formatAlertPayload } from './src/presentation/alertFormatter.js';
 import { formatClientReport } from './src/presentation/reportFormatter.js';
-import { sendWebhookAlert } from './src/notifications/webhookNotifier.js';
-import { evaluateAlertDedup, recordSentAlert } from './src/notifications/alertDeduplicator.js';
 import {
     evaluateAlertEscalation,
     applyEscalationToAlert,
-    recordEscalationEvent,
 } from './src/notifications/alertEscalator.js';
-import {
-    shouldUseImmediateDelivery,
-    shouldQueueForDigest,
-    queueDigestAlert,
-    recordDigestDelivery,
-} from './src/notifications/digestManager.js';
-import { formatSlackPayload } from './src/notifications/slackFormatter.js';
 import {
     resolveDeliveryPreferences,
     evaluateDeliveryPreferences,
 } from './src/delivery/deliveryPreferences.js';
-import {
-    routeImmediateAlert,
-    routeDigestAlert,
-} from './src/notifications/channelRouter.js';
 import {
     routeImmediateAlert,
     routeDigestAlert,
@@ -438,6 +422,78 @@ function outputChangeTypeFromDiff(semanticDiff = {}) {
 
     return 'mixed_change';
 }
+function getSignalDecision(changeMeta = {}, riskAssessment = {}, previousState = {}) {
+    const changeType = changeMeta?.changeType || 'no_change';
+    const riskScore = riskAssessment?.riskScore || 0;
+    const severity = riskAssessment?.severity || 'none';
+    const currentClassification = changeMeta?.classification || null;
+    const lastClassification = previousState?.lastClassification || null;
+
+    if (changeType === 'no_change') {
+        return { notify: false, reason: 'no_meaningful_change' };
+    }
+
+    if (severity === 'critical' || riskScore >= 80) {
+        return { notify: true, reason: 'high_risk_change' };
+    }
+
+    if (
+        currentClassification &&
+        lastClassification &&
+        currentClassification !== lastClassification
+    ) {
+        return { notify: true, reason: 'classification_changed' };
+    }
+
+    if ((changeMeta?.newConcepts || []).length > 0) {
+        return { notify: true, reason: 'new_concepts_detected' };
+    }
+
+    if (changeType === 'removed_only' || changeType === 'mixed_change') {
+        return { notify: true, reason: 'material_change_detected' };
+    }
+
+    return { notify: false, reason: 'low_signal_change' };
+}
+
+function makeDecision({ preferenceDecision = {}, signalDecision = {}, riskAssessment = {} }) {
+    if (!signalDecision?.notify) {
+        return {
+            priority: 'none',
+            reason: signalDecision?.reason || 'signal_suppressed',
+        };
+    }
+
+    const route = preferenceDecision?.route || 'skip';
+    const riskScore = riskAssessment?.riskScore || 0;
+    const severity = riskAssessment?.severity || 'none';
+
+    if (severity === 'critical' || riskScore >= 80) {
+        return {
+            priority: 'immediate',
+            reason: 'high_risk_override',
+        };
+    }
+
+    if (route === 'immediate') {
+        return {
+            priority: 'immediate',
+            reason: preferenceDecision?.reason || 'preference_immediate',
+        };
+    }
+
+    if (route === 'digest') {
+        return {
+            priority: 'digest',
+            reason: preferenceDecision?.reason || 'preference_digest',
+        };
+    }
+
+    return {
+        priority: 'none',
+        reason: preferenceDecision?.reason || 'delivery_skipped',
+    };
+}
 
 // ========== SINGLE URL PROCESSOR ==========
 
@@ -603,10 +659,18 @@ async function processUrl(targetUrl, OUTPUT_CONTRACT, log, deliveryContext = {})
     const isFirstSeen = !previousRawText;
 
     const currentSemantic = extractSemanticMeaning(rawText);
-    const policyClassification = classifyPolicyType(rawText, targetUrl);
-    const changeExplanations = isFirstSeen ? [] : explainPolicyChanges(previousRawText, rawText);
+const policyClassification = classifyPolicyType(rawText, targetUrl);
+const changeExplanations = isFirstSeen ? [] : explainPolicyChanges(previousRawText, rawText);
 
-    const riskAssessment = scorePolicyRisk({
+const semanticDiff = isFirstSeen
+    ? {
+        added: [],
+        removed: [],
+        modified: [],
+        severity: 'none',
+    }
+    : detectSemanticChange(previousSemantic, currentSemantic);
+const riskAssessment = scorePolicyRisk({
     semanticDiff,
     policyClassification,
     changeExplanations,
@@ -712,6 +776,11 @@ output.signalDecision = signalDecision;
             alertPayload: finalAlertPayload,
             preferences: resolvedDelivery.preferences,
         });
+        const decision = makeDecision({
+    preferenceDecision,
+    signalDecision,
+    riskAssessment,
+});
 if (!signalDecision.notify) {
     output.deliveryDecision = {
         route: 'skip',
@@ -752,241 +821,49 @@ if (!signalDecision.notify) {
 } else {
     output.deliveryDecision = preferenceDecision;
 
-    // existing immediate/digest logic stays inside here
-        output.deliveryDecision = preferenceDecision;
+    if (decision.priority === 'immediate') {
+        const channelRouteResult = await routeImmediateAlert({
+            alertPayload: finalAlertPayload,
+            preferences: resolvedDelivery.preferences,
+        });
 
-        const useImmediateDelivery =
-            preferenceDecision.route === 'immediate' &&
-            shouldUseImmediateDelivery(finalAlertPayload);
+        output.channelDelivery = channelRouteResult;
+        output.digestRouting = {
+            mode: 'immediate',
+            reason: decision.reason,
+        };
+    } else if (decision.priority === 'digest') {
+        const digestRouteResult = await routeDigestAlert({
+            alertPayload: finalAlertPayload,
+            preferences: resolvedDelivery.preferences,
+        });
 
-        const useDigestDelivery =
-            preferenceDecision.route === 'digest' &&
-            shouldQueueForDigest(finalAlertPayload);
+        output.channelDelivery = digestRouteResult;
+        output.digestRouting = {
+            mode: 'digest',
+            reason: decision.reason,
+        };
+    } else {
+        output.digestRouting = {
+            mode: 'none',
+            reason: decision.reason || preferenceDecision.reason,
+        };
 
-        if (useImmediateDelivery) {
-            output.digestRouting = {
-                mode: 'immediate',
-                reason: preferenceDecision.reason,
-            };
+        output.digestDelivery = {
+            attempted: false,
+            skipped: true,
+            reason: decision.reason || preferenceDecision.reason,
+            deliveredAt: null,
+        };
 
-            const dedupDecision = await evaluateAlertDedup({
-                url: targetUrl,
-                alertPayload: finalAlertPayload,
-                cooldownMinutes: alertCooldownMinutes,
-            });
-
-            output.alertDedup = dedupDecision;
-
-            if (dedupDecision.shouldSend) {
-                                const channelRouteResult = await routeImmediateAlert({
-                    alertPayload: finalAlertPayload,
-                    preferences: resolvedDelivery.preferences,
-                });
-
-                output.channelDelivery = channelRouteResult;
-
-                const primaryChannelResult =
-                    channelRouteResult.results.slack ||
-                    channelRouteResult.results.email ||
-                    { success: false, skipped: true, reason: 'No channel result available' };
-
-                output.webhookDelivery = {
-                    attempted: Boolean(channelRouteResult.results.slack),
-                    ...(channelRouteResult.results.slack || {
-                        skipped: true,
-                        reason: 'Slack channel not used',
-                    }),
-                    deliveredAt: new Date().toISOString(),
-                };
-
-                output.digestDelivery = {
-                    attempted: false,
-                    skipped: true,
-                    reason: 'Immediate delivery path used',
-                    deliveredAt: null,
-                };
-
-                if (primaryChannelResult?.success) {
-                    await recordEscalationEvent({
-                        url: targetUrl,
-                        alertPayload: finalAlertPayload,
-                        escalationDecision,
-                        webhookResult: primaryChannelResult,
-                    });
-
-                    await recordSentAlert({
-                        url: targetUrl,
-                        alertPayload: finalAlertPayload,
-                        fingerprint: dedupDecision.fingerprint,
-                        cooldownMinutes: alertCooldownMinutes,
-                        webhookResult: primaryChannelResult,
-                    });
-                }
-
-                log?.info('Immediate multi-channel alert processed', {
-                    url: targetUrl,
-                    priority: finalAlertPayload.priority,
-                    requiresHumanReview: finalAlertPayload.requiresHumanReview,
-                    channels: channelRouteResult.channels,
-                    dedupReason: dedupDecision.reason,
-                    escalated: escalationDecision.escalated,
-                    preferenceReason: preferenceDecision.reason,
-                }) || console.log('Immediate multi-channel alert processed', targetUrl);
-
-                log?.info('Immediate Slack alert processed', {
-                    url: targetUrl,
-                    priority: finalAlertPayload.priority,
-                    requiresHumanReview: finalAlertPayload.requiresHumanReview,
-                    webhookSuccess: primaryChannelResult?.success || false,
-                    dedupReason: dedupDecision.reason,
-                    escalated: escalationDecision.escalated,
-                    preferenceReason: preferenceDecision.reason,
-                }) || console.log('Immediate Slack alert processed', targetUrl);
-            } else {
-                output.webhookDelivery = {
-                    attempted: false,
-                    skipped: true,
-                    reason: dedupDecision.reason,
-                    deliveredAt: null,
-                };
-
-                output.digestDelivery = {
-                    attempted: false,
-                    skipped: true,
-                    reason: 'Immediate alert skipped by dedup layer',
-                    deliveredAt: null,
-                };
-
-                log?.info('Immediate Slack alert skipped by dedup layer', {
-                    url: targetUrl,
-                    priority: finalAlertPayload.priority,
-                    dedupReason: dedupDecision.reason,
-                    lastSentAt: dedupDecision.lastSentAt,
-                    preferenceReason: preferenceDecision.reason,
-                }) || console.log('Immediate Slack alert skipped by dedup layer', targetUrl);
-            }
-        } else if (useDigestDelivery) {
-            output.alertDedup = {
-                shouldSend: false,
-                reason: 'Digest path selected; immediate dedup not applied',
-                cooldownMinutes: alertCooldownMinutes,
-            };
-
-            const digestDecision = await queueDigestAlert({
-                url: targetUrl,
-                alertPayload: finalAlertPayload,
-                channel: digestChannel,
-                windowMinutes: digestWindowMinutes,
-                maxItems: digestMaxItems,
-            });
-
-            output.digestRouting = {
-                mode: 'digest',
-                reason: digestDecision.shouldSendDigest
-                    ? `Digest ready via ${digestDecision.trigger}`
-                    : preferenceDecision.reason,
-                channel: digestChannel,
-                queueCount: digestDecision.queueCount,
-                duplicateSkipped: digestDecision.duplicateSkipped,
-                trigger: digestDecision.trigger,
-            };
-
-            if (digestDecision.shouldSendDigest) {
-                const slackDigestPayload = formatSlackPayload(digestDecision.digestPayload);
-                const digestWebhookResult = await sendWebhookAlert(
-                    webhookUrl,
-                    slackDigestPayload
-                );
-
-                output.digestDelivery = {
-                    attempted: true,
-                    ...digestWebhookResult,
-                    deliveredAt: new Date().toISOString(),
-                    trigger: digestDecision.trigger,
-                    itemCount: digestDecision.digestPayload?.itemCount || digestDecision.queueCount,
-                    renderMode: 'slack_blocks',
-                };
-
-                output.webhookDelivery = {
-                    attempted: false,
-                    skipped: true,
-                    reason: 'Digest webhook used instead of immediate alert',
-                    deliveredAt: null,
-                };
-
-                if (digestWebhookResult?.success) {
-                    await recordEscalationEvent({
-                        url: targetUrl,
-                        alertPayload: finalAlertPayload,
-                        escalationDecision,
-                        webhookResult: digestWebhookResult,
-                    });
-
-                    await recordDigestDelivery({
-                        channel: digestChannel,
-                        webhookResult: digestWebhookResult,
-                    });
-                }
-
-                log?.info('Slack digest processed', {
-                    url: targetUrl,
-                    queueCount: digestDecision.queueCount,
-                    trigger: digestDecision.trigger,
-                    digestSuccess: digestWebhookResult?.success || false,
-                    preferenceReason: preferenceDecision.reason,
-                }) || console.log('Slack digest processed', targetUrl);
-            } else {
-                output.digestDelivery = {
-                    attempted: false,
-                    skipped: true,
-                    reason: digestDecision.duplicateSkipped
-                        ? 'Duplicate alert already queued in digest'
-                        : 'Digest thresholds not yet met',
-                    deliveredAt: null,
-                    queueCount: digestDecision.queueCount,
-                };
-
-                output.webhookDelivery = {
-                    attempted: false,
-                    skipped: true,
-                    reason: 'Queued for digest delivery',
-                    deliveredAt: null,
-                };
-
-                log?.info('Alert queued for Slack digest delivery', {
-                    url: targetUrl,
-                    queueCount: digestDecision.queueCount,
-                    duplicateSkipped: digestDecision.duplicateSkipped,
-                    preferenceReason: preferenceDecision.reason,
-                }) || console.log('Alert queued for Slack digest delivery', targetUrl);
-            }
-        } else {
-            output.alertDedup = {
-                shouldSend: false,
-                reason: preferenceDecision.reason,
-                cooldownMinutes: alertCooldownMinutes,
-            };
-
-            output.digestRouting = {
-                mode: 'none',
-                reason: preferenceDecision.reason,
-            };
-
-            output.digestDelivery = {
-                attempted: false,
-                skipped: true,
-                reason: preferenceDecision.reason,
-                deliveredAt: null,
-            };
-
-            output.webhookDelivery = {
-                attempted: false,
-                skipped: true,
-                reason: preferenceDecision.reason,
-                deliveredAt: null,
-            };
-        }
+        output.webhookDelivery = {
+            attempted: false,
+            skipped: true,
+            reason: decision.reason || preferenceDecision.reason,
+            deliveredAt: null,
+        };
     }
+}
     } else {
         output.alertEscalation = {
             escalated: false,
@@ -1040,8 +917,14 @@ if (!signalDecision.notify) {
 
     await Actor.setValue(outputKey, output);
     await Actor.setValue(diffKey, semanticDiff);
-    await Actor.setValue(currentSnapshotKey, currentSemantic);
-    await Actor.setValue(snapshotKey, currentSemantic);
+    const semanticStateToStore = {
+    ...currentSemantic,
+    lastClassification: policyClassification?.primaryType || null,
+    lastChangeType: outputChangeTypeFromDiff(semanticDiff),
+};
+
+await Actor.setValue(currentSnapshotKey, semanticStateToStore);
+await Actor.setValue(snapshotKey, semanticStateToStore);
     await Actor.setValue(signalsKey, signals);
     await Actor.setValue(rawCurrentKey, rawText);
     await Actor.setValue(rawTextKey, rawText);
